@@ -104,6 +104,16 @@ def _pascal_mask_strings(text: str) -> str:
         return tok[:q] + inner + tok[-q:]
     return _PAS_TOKEN_RE.sub(_sub, text)
 
+def _pascal_is_member_call(callee_text: str) -> bool:
+    """True for a call made on another object or unit (`Query.Refresh`).
+
+    Without the receiver's type the target cannot be told apart from any
+    same-named method elsewhere, so cross-file passes must not guess it.
+    `Self.Foo` stays an ordinary call on the caller's own class.
+    """
+    head, dot, _rest = callee_text.partition(".")
+    return bool(dot) and head.strip().lower() != "self"
+
 def _pascal_split_sections(text: str) -> tuple[str, int, str, int]:
     """Split into (iface_text, iface_offset, impl_text, impl_offset).
     Files without interface/implementation sections (dpr/lpr/inc) return
@@ -440,6 +450,7 @@ def _extract_pascal_regex(path: Path) -> dict:
                     "source_location": f"L{call_line}",
                     "caller_nid": caller_nid,
                     "callee": callee_name,
+                    "is_member_call": _pascal_is_member_call(cm.group(1)),
                 })
                 continue
             pair = (caller_nid, target_nid)
@@ -697,7 +708,7 @@ def extract_pascal(path: Path) -> dict:
     seen_call_pairs: set[tuple[str, str]] = set()
     raw_calls: list[dict] = []
 
-    def _emit_or_report(caller_nid: str, name_lower: str, line: int) -> None:
+    def _emit_or_report(caller_nid: str, name_lower: str, line: int, member: bool = False) -> None:
         target = resolve_callee(caller_nid, name_lower)
         if target == caller_nid:
             return
@@ -711,6 +722,7 @@ def extract_pascal(path: Path) -> dict:
                 "source_location": f"L{line}",
                 "caller_nid": caller_nid,
                 "callee": name_lower,
+                "is_member_call": member,
             })
             return
         pair = (caller_nid, target)
@@ -723,10 +735,13 @@ def extract_pascal(path: Path) -> dict:
             callee_text = None
             for child in node.children:
                 if child.is_named and child.type not in ("exprArgs",):
-                    callee_text = _read(child).split(".")[-1]
+                    callee_text = _read(child)
                     break
             if callee_text:
-                _emit_or_report(caller_nid, callee_text.lower(), node.start_point[0] + 1)
+                _emit_or_report(
+                    caller_nid, callee_text.split(".")[-1].lower(), node.start_point[0] + 1,
+                    member=_pascal_is_member_call(callee_text),
+                )
         elif node.type == "statement":
             # Pascal bare procedure calls with no args: `Reset;`
             # tree-sitter represents these as statement → identifier (no exprCall wrapper)

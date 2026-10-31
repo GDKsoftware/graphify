@@ -156,6 +156,49 @@ def test_uses_in_path_survives_masking():
     )
 
 
+AMBIGUOUS = Path(__file__).parent / "fixtures" / "pascal_ambiguous_inherit"
+MEMBER = Path(__file__).parent / "fixtures" / "pascal_member_calls"
+
+
+def _calls_from(graph: dict, src_label: str) -> list[tuple[str, str]]:
+    """(target source file name, confidence) of every calls edge from src_label."""
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    out = []
+    for e in graph["edges"]:
+        if e.get("relation") != "calls":
+            continue
+        if str(nodes.get(e["source"], {}).get("label")) != src_label:
+            continue
+        target_file = Path(str(nodes.get(e["target"], {}).get("source_file", ""))).name
+        out.append((target_file, str(e.get("confidence"))))
+    return out
+
+
+def test_proven_inherited_call_drops_the_shared_pass_guess(tmp_path):
+    # TChildLaad inherits Laad from sub/BaseLaadB.pas; an unrelated TBaseLaadA.Laad
+    # sits next to the caller. Case folding lets the by-name pass guess the
+    # nearer one first; once the inherits walk proves BaseLaadB, the guess must go.
+    graph = extract(
+        [AMBIGUOUS / "BaseLaadA.pas", AMBIGUOUS / "sub" / "BaseLaadB.pas", AMBIGUOUS / "ChildLaad.pas"],
+        cache_root=tmp_path, parallel=False,
+    )
+    assert _calls_from(graph, "Doe()") == [("BaseLaadB.pas", "EXTRACTED")]
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_qualified_call_is_marked_as_member_call(extractor):
+    r = extractor(MEMBER / "MemberForm.pas")
+    rc = [c for c in r.get("raw_calls", []) if c.get("callee") == "refresh"]
+    assert rc and all(c.get("is_member_call") for c in rc)
+
+
+def test_member_call_on_unknown_object_does_not_bind_across_units(tmp_path):
+    graph = extract(
+        [MEMBER / "MemberDM.pas", MEMBER / "MemberForm.pas"], cache_root=tmp_path, parallel=False,
+    )
+    assert _calls_from(graph, "Btn()") == []
+
+
 def test_string_does_not_create_cross_unit_edge():
     graph = extract([HELPERS, CALLER])
     assert _call_edge(graph, "Rapport()", "InitCap()") is None

@@ -25,6 +25,10 @@ from __future__ import annotations
 
 _PASCAL_SUFFIXES = (".pas", ".pp", ".dpr", ".dpk", ".inc")
 
+# Set on a shared-pass `calls` guess that this resolver proved wrong; the
+# caller drops flagged edges after the resolvers ran.
+SUPERSEDED_FLAG = "_superseded_by_pascal_resolver"
+
 
 def _pascal_raw_calls(per_file: list[dict]) -> list[dict]:
     calls: list[dict] = []
@@ -95,6 +99,14 @@ def resolve_pascal_inherited_calls(
         for e in all_edges
         if e.get("relation") == "calls" and e.get("confidence") != "EXTRACTED"
     }
+    # The same pass may instead have guessed a DIFFERENT same-named method for
+    # this call (nearest by path). Once the inherits walk proves the target, that
+    # guess is wrong. It is flagged rather than removed: on an incremental build
+    # this resolver runs over a scratch copy whose new tail is merged back by
+    # index, so the flag is filtered out by the caller (`extract.extract`).
+    guesses_at: dict[tuple, list[dict]] = {}
+    for e in inferred_calls.values():
+        guesses_at.setdefault((e.get("source"), e.get("source_location")), []).append(e)
 
     def _resolve(owner: str, name_lower: str) -> str | None:
         seen_bases: set[str] = set()
@@ -115,12 +127,19 @@ def resolve_pascal_inherited_calls(
         name_lower = rc.get("callee")
         if not caller or not name_lower:
             continue
+        # `Query.Refresh` is a call on some other object: the caller's own
+        # ancestor chain says nothing about its target.
+        if rc.get("is_member_call"):
+            continue
         owner = owner_of.get(caller)
         if not owner:
             continue
         target = _resolve(str(owner), str(name_lower))
         if not target or target == caller:
             continue
+        for guess in guesses_at.get((caller, rc.get("source_location")), []):
+            if guess.get("target") != target:
+                guess[SUPERSEDED_FLAG] = True
         pair = (caller, target)
         if pair in existing_pairs:
             guessed = inferred_calls.pop(pair, None)

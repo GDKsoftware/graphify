@@ -28,6 +28,7 @@ from .resolver_registry import (
 from .ruby_resolution import resolve_ruby_member_calls
 from .csharp_dispatch import resolve_csharp_interface_dispatch
 from .swift_dispatch import resolve_swift_protocol_dispatch
+from .pascal_resolution import SUPERSEDED_FLAG as PASCAL_SUPERSEDED_FLAG
 from .pascal_resolution import resolve_pascal_inherited_calls
 from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions
 
@@ -11255,6 +11256,10 @@ def extract(
         all_edges.extend(_rl_edges[_e0:])
     else:
         run_language_resolvers(paths, per_file, all_nodes, all_edges)
+
+    # A by-name `calls` guess the Pascal resolver proved wrong (see
+    # graphify.pascal_resolution.SUPERSEDED_FLAG) is dropped now that it is final.
+    all_edges[:] = [e for e in all_edges if not e.pop(PASCAL_SUPERSEDED_FLAG, False)]
 
     # A Rust `use` group keeps one edge per binding; its v8 edge only served the calls above.
     all_edges[:] = [e for e in all_edges if not e.pop("_rust_use_group", False)]

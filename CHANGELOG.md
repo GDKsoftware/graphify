@@ -4,7 +4,7 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 
 ## Unreleased
 
-- Fix: **pascal** Pascal/Delphi identifiers are matched case-insensitively in cross-file call resolution, so a call to `Maandnaam` in another unit resolves to its `Maandnaam()` definition instead of missing it or binding to an unrelated lower-case symbol; an inherited call the shared pass binds first is upgraded to EXTRACTED by the Pascal inherited-call resolver.
+- Fix: **pascal** Pascal/Delphi identifiers are matched case-insensitively in cross-file call resolution, so a call to `Maandnaam` in another unit resolves to its `Maandnaam()` definition instead of missing it or binding to an unrelated lower-case symbol; an inherited call the shared pass binds first is upgraded to EXTRACTED by the Pascal inherited-call resolver, and a same-named guess it proves wrong is dropped; a call on another object (`Query.Refresh`) is marked `is_member_call`, so it is no longer bound by name to an unrelated method in another unit.
 - Fix: **pascal** the regex fallback extractor masks string literals before it scans for calls, so text inside a string (SQL such as `initcap(...)`, or an `end;`) is no longer read as code; Delphi 12 multiline strings (`'''` ... `'''`) are recognised, and call lines are counted from the start of the routine body so `var` sections no longer shift them.
 
 ## 0.9.99 (2026-10-30)
