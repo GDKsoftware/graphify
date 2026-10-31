@@ -86,6 +86,15 @@ def resolve_pascal_inherited_calls(
                 bucket.append(method_nid)
 
     existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    # The shared by-name pass runs before this resolver and may already have
+    # bound the same caller/target pair as an INFERRED guess (Pascal names fold
+    # case, so a unique same-named label is found). Walking `inherits` proves the
+    # binding, so upgrade that edge rather than leave the weaker guess in place.
+    inferred_calls: dict[tuple, dict] = {
+        (e.get("source"), e.get("target")): e
+        for e in all_edges
+        if e.get("relation") == "calls" and e.get("confidence") != "EXTRACTED"
+    }
 
     def _resolve(owner: str, name_lower: str) -> str | None:
         seen_bases: set[str] = set()
@@ -114,6 +123,10 @@ def resolve_pascal_inherited_calls(
             continue
         pair = (caller, target)
         if pair in existing_pairs:
+            guessed = inferred_calls.pop(pair, None)
+            if guessed is not None:
+                guessed["confidence"] = "EXTRACTED"
+                guessed["confidence_score"] = 1.0
             continue
         existing_pairs.add(pair)
         all_edges.append({

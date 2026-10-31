@@ -213,11 +213,13 @@ def test_classification_follows_the_declaration():
 
 
 def test_case_folding_and_interop_family_follow_the_declaration():
-    assert not _lang_is_case_insensitive("lib/a.inc")
-    assert _lang_family("lib/a.inc") is None
-    set_language_overrides({".inc": ".php"})
-    assert _lang_is_case_insensitive("lib/a.inc")  # PHP identifiers fold case
-    assert _lang_family("lib/a.inc") == "php"
+    # `.inc` is Pascal by default, and Pascal identifiers fold case too.
+    assert _lang_is_case_insensitive("lib/a.inc")
+    assert not _lang_is_case_insensitive("lib/a.tpl")
+    assert _lang_family("lib/a.tpl") is None
+    set_language_overrides({".tpl": ".php"})
+    assert _lang_is_case_insensitive("lib/a.tpl")  # PHP identifiers fold case
+    assert _lang_family("lib/a.tpl") == "php"
 
 
 def test_language_resolvers_wake_for_the_declared_language():

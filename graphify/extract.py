@@ -3796,6 +3796,7 @@ _CASE_INSENSITIVE_EXTS = frozenset({
     ".nim", ".nims", ".nimble",                                      # Nim (style-insensitive)
     ".cbl", ".cob", ".cobol", ".cpy",
     ".vb",
+    ".pas", ".pp", ".dpr", ".dpk", ".lpr", ".inc",                   # Pascal/Delphi identifiers
 })
 
 
@@ -10727,7 +10728,8 @@ def extract(
             # Case is semantic in most languages, so index (and match, below) by exact
             # case — folding collapses `Path` (class) into `PATH` (env var) and makes a
             # single shell variable the #1 god-node (#1581). Only case-insensitive
-            # languages (PHP/SQL/Nim) also get a folded key for legitimate fold-matching.
+            # languages (PHP/SQL/Nim/COBOL/VB/Pascal) also get a folded key for
+            # legitimate fold-matching.
             global_label_to_nids.setdefault(normalised, []).append(n["id"])
             if _lang_is_case_insensitive(n.get("source_file")):
                 global_label_to_nids_ci.setdefault(normalised.lower(), []).append(n["id"])
