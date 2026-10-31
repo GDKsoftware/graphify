@@ -2,6 +2,11 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/Graphify-Labs/graphify/releases)
 
+## Unreleased
+
+- Fix: **pascal** Pascal/Delphi identifiers are matched case-insensitively in cross-file call resolution, so a call to `Maandnaam` in another unit resolves to its `Maandnaam()` definition instead of missing it or binding to an unrelated lower-case symbol; an inherited call the shared pass binds first is upgraded to EXTRACTED by the Pascal inherited-call resolver.
+- Fix: **pascal** the regex fallback extractor masks string literals before it scans for calls, so text inside a string (SQL such as `initcap(...)`, or an `end;`) is no longer read as code; Delphi 12 multiline strings (`'''` ... `'''`) are recognised, and call lines are counted from the start of the routine body so `var` sections no longer shift them.
+
 ## 0.9.99 (2026-10-30)
 
 - Feat: **path** when several routes tie on length, `graphify path` and the MCP `shortest_path` tool report the most conservative one: among all shortest paths, the route whose weakest hop is weakest is chosen, and the summary notes it was the weakest of N equal-length routes. Previously an arbitrary equal-length route was returned, so the confidence could overstate how sure the connection is. This is the second half of #4881 (the first half, keeping a collapsed edge's weaker evidence in `also_seen`, shipped in 0.9.98 via #4891, thanks @SyedFahad7).
