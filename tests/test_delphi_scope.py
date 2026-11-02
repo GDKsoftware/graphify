@@ -312,15 +312,48 @@ def test_typed_field_qualifier(run):
 
 def test_self_qualifier(run):
     g = _qualified_run(run)
+    edge = _call(g, ("DataMod.pas", "Laad()"), ("DataMod.pas", "Prive()"))
+    assert edge is not None and edge["rule"] == "5.2/1"
     assert _call(g, ("DataMod.pas", "Laad()"), ("DataMod.pas", "Laad()")) is None
 
 
 def test_unknown_qualifier_gives_no_edge(run):
     g = _qualified_run(run)
     targets = {_node(g, e["target"]).get("label") for e in _calls_from(g, "DataMod.pas", "Laad()")}
-    assert targets == {"InitCap()", "DoeIets()", "Maak()", "Help()"}
+    assert targets == {"InitCap()", "DoeIets()", "Maak()", "Help()", "Prive()"}
 
 
 def test_private_member_of_variable_type_from_other_unit_gives_no_edge(run):
     g = _qualified_run(run)
-    assert _calls_from(g, "DataMod.pas", "Prive()") == []
+    assert _call(g, ("DataMod.pas", "Prive()"), ("Main.pas", "Verborgen()")) is None
+
+
+def test_unit_variable_and_unit_type_qualifier(run):
+    g = _qualified_run(run)
+    prive = ("DataMod.pas", "Prive()")
+    var_edge = _call(g, prive, ("Main.pas", "DoeIets()"))
+    type_edge = _call(g, prive, ("Main.pas", "Maak()"))
+    assert var_edge is not None and var_edge["rule"] == "5.2/3"
+    assert type_edge is not None and type_edge["rule"] == "5.2/3"
+
+
+def test_duplicated_unit_qualifier_gives_no_edge(run):
+    g = run("dup_a/Dup.pas", "dup_b/Dup.pas", "UsesDupQual.pas")
+    assert _calls_from(g, "UsesDupQual.pas", "Test()") == []
+
+
+def test_parameter_named_like_global_gives_no_edge(run):
+    g = run("Main.pas", "QualLocal.pas")
+    assert _calls_from(g, "QualLocal.pas", "ParamVrij()") == []
+
+
+def test_local_named_like_type_gives_no_edge(run):
+    g = run("Main.pas", "QualLocal.pas")
+    assert _calls_from(g, "QualLocal.pas", "Lokaal()") == []
+
+
+def test_field_named_like_global_gives_no_edge(run):
+    # In Delphi the field wins over the global; spec order 4-6 would pick the
+    # global. Deliberately more conservative: when both match, no edge at all.
+    g = run("Main.pas", "QualLocal.pas")
+    assert _calls_from(g, "QualLocal.pas", "Veld()") == []

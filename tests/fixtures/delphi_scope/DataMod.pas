@@ -25,12 +25,15 @@ begin
   THelper.Maak;
   FHelper.Help;
   Self.Laad;
+  Self.Prive;
   GetObj.Bar;
 end;
 
 procedure TdmData.Prive;
 begin
   frmMain.Verborgen;
+  Main.frmMain.DoeIets;
+  Main.THelper.Maak;
 end;
 
 end.

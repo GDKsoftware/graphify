@@ -72,6 +72,7 @@ def make_raw_call(
     qualifier: str | None,
     arg_count: int | None,
     enclosing_routines: list[str],
+    local_receiver: bool = False,
 ) -> dict:
     """Build a Pascal raw call (spec section 4.2, without ``with_stack``)."""
     return {
@@ -81,9 +82,17 @@ def make_raw_call(
         "caller_nid": caller_nid,
         "callee": callee,
         "qualifier": qualifier,
-        # Only an expression receiver is known to be a member call here; whether
-        # a plain qualifier is a unit, variable or type is up to the resolver.
-        "is_member_call": is_expression_receiver(qualifier),
+        # An expression receiver, or a receiver that is a parameter or local of
+        # the caller, is a member call on a value of unknown type; whether any
+        # other plain qualifier is a unit, variable or type is up to the resolver.
+        "is_member_call": local_receiver or is_expression_receiver(qualifier),
         "arg_count": arg_count,
         "enclosing_routines": enclosing_routines,
     }
+
+
+def is_local_receiver(qualifier: str | None, shadow: set[str]) -> bool:
+    """Whether the head of `qualifier` names a parameter or local of the caller."""
+    if not qualifier or qualifier.lower() in ("self", "inherited"):
+        return False
+    return qualifier.split(".", 1)[0].strip().lower() in shadow

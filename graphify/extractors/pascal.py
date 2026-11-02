@@ -4,7 +4,12 @@ from __future__ import annotations
 import copy
 import re
 from graphify.extractors.base import _file_stem, _make_id, _read_source_bytes, _read_source_text
-from graphify.extractors.pascal_calls import count_args, make_raw_call, split_callee
+from graphify.extractors.pascal_calls import (
+    count_args,
+    is_local_receiver,
+    make_raw_call,
+    split_callee,
+)
 from graphify.extractors.resolution import _pascal_resolve_class, _pascal_resolve_unit
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -557,6 +562,7 @@ def _extract_pascal_regex(path: Path) -> dict:
                 source_file=str_path, line=call_line, caller_nid=caller_nid,
                 callee=callee_name, qualifier=qualifier, arg_count=arg_count,
                 enclosing_routines=chain,
+                local_receiver=is_local_receiver(qualifier, shadow),
             ))
 
     result = {
@@ -861,6 +867,7 @@ def extract_pascal(path: Path) -> dict:
             source_file=str_path, line=line, caller_nid=caller_nid, callee=callee,
             qualifier=qualifier, arg_count=arg_count,
             enclosing_routines=proc_scope[caller_nid][0],
+            local_receiver=is_local_receiver(qualifier, proc_scope[caller_nid][1]),
         ))
 
     def _call_site(

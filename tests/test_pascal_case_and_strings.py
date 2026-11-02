@@ -199,12 +199,12 @@ def test_inherited_call_binds_the_ancestor_not_a_nearer_same_named_method(tmp_pa
 
 @pytest.mark.parametrize("extractor", _extractors())
 def test_qualified_call_keeps_its_qualifier(extractor):
-    # `Query.Refresh`: the extractor cannot tell a unit, variable or type
-    # apart, so it keeps the qualifier and leaves the decision to the resolver;
-    # only an expression receiver is marked as a member call (spec 4.2).
+    # `Query.Refresh` with a local `Query`: the qualifier is kept, and because
+    # the receiver is a local of the caller it is marked as a member call, so
+    # the resolver never binds it to a global or type of the same name.
     r = extractor(MEMBER / "MemberForm.pas")
     rc = [c for c in r.get("raw_calls", []) if str(c.get("callee")).lower() == "refresh"]
-    assert rc and all(c.get("qualifier") and not c.get("is_member_call") for c in rc)
+    assert rc and all(c.get("qualifier") and c.get("is_member_call") for c in rc)
 
 
 def test_member_call_on_unknown_object_does_not_bind_across_units(tmp_path):

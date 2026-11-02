@@ -92,7 +92,7 @@ class DelphiResolver:
         if rc.get("with_stack"):
             return None  # names inside `with` may be members of the with-object
         qualifier = rc.get("qualifier")
-        if is_expression_receiver(qualifier):
+        if rc.get("is_member_call") or is_expression_receiver(qualifier):
             return None
         enclosing: Sequence[str] = rc.get("enclosing_routines") or ()
         arg_count = rc.get("arg_count")
