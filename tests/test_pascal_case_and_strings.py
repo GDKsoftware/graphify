@@ -186,10 +186,10 @@ def _calls_from(graph: dict, src_label: str) -> list[tuple[str, str]]:
     return out
 
 
-def test_proven_inherited_call_drops_the_shared_pass_guess(tmp_path):
+def test_inherited_call_binds_the_ancestor_not_a_nearer_same_named_method(tmp_path):
     # TChildLaad inherits Laad from sub/BaseLaadB.pas; an unrelated TBaseLaadA.Laad
-    # sits next to the caller. Case folding lets the by-name pass guess the
-    # nearer one first; once the inherits walk proves BaseLaadB, the guess must go.
+    # sits next to the caller. Only the ancestor is in scope, so it is the one
+    # and only edge, never the nearer same-named method.
     graph = extract(
         [AMBIGUOUS / "BaseLaadA.pas", AMBIGUOUS / "sub" / "BaseLaadB.pas", AMBIGUOUS / "ChildLaad.pas"],
         cache_root=tmp_path, parallel=False,

@@ -106,8 +106,10 @@ class SymbolTable:
         self._globals: dict[str, dict[str, str]] = {}
         self._proc_types: dict[str, set[str]] = {}
         self._files: dict[str, str] = {}
-        # Unit names declared by more than one scanned file.
-        self._ambiguous: set[str] = set()
+        # Unit names declared by more than one scanned file -> their private keys.
+        self._ambiguous: dict[str, list[str]] = {}
+        # Include file -> the units that include it.
+        self._include_owners: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------ building
 
@@ -134,14 +136,15 @@ class SymbolTable:
         for block in unit_blocks:
             key = block["unit"].casefold()
             counts[key] = counts.get(key, 0) + 1
-        table._ambiguous = {key for key, n in counts.items() if n > 1}
+        table._ambiguous = {key: [] for key, n in counts.items() if n > 1}
         keys: list[str] = []
         for i, block in enumerate(unit_blocks):
             name = block["unit"]
             if name.casefold() in table._ambiguous:
                 # Two scanned files declare this unit. Each keeps its own block
                 # under a private key, so lookups in the caller's own unit use
-                # the caller's file; by name the unit is ambiguous (no hit).
+                # the caller's file; by name the unit is ambiguous.
+                table._ambiguous[name.casefold()].append(f"{name}#{i}")
                 name = f"{name}#{i}"
             keys.append(name.casefold())
             table._add_unit(name, block, scanned=True)
@@ -232,6 +235,11 @@ class SymbolTable:
                 if inc is None:
                     continue
                 self._replace_with_include(key, inc)
+                owners = self._include_owners.setdefault(
+                    _norm_path(inc.get("source_file") or ""), [],
+                )
+                if self._units[key].name not in owners:
+                    owners.append(self._units[key].name)
 
     def _replace_with_include(self, unit_key: str, inc: dict) -> None:
         unit = self._units[unit_key]
@@ -256,25 +264,43 @@ class SymbolTable:
     def resolve_unit_name(self, name: str) -> str | None:
         """Exact (case-insensitive) first, then `<namespace>.<name>` in order.
 
-        A unit name that more than one scanned file declares resolves to None.
+        A unit name that more than one scanned file declares resolves to None;
+        `duplicates` returns the private names of its blocks.
         """
-        if name.casefold() in self._ambiguous:
-            return None
-        found = self._units.get(name.casefold())
-        if found is not None:
-            return found.name
-        for ns in self._namespaces:
-            found = self._units.get(f"{ns}.{name}".casefold())
+        for candidate in self._name_candidates(name):
+            if candidate in self._ambiguous:
+                return None
+            found = self._units.get(candidate)
             if found is not None:
                 return found.name
         return None
+
+    def duplicates(self, name: str) -> list[str]:
+        """Private unit names of every scanned file declaring `name`, when more
+        than one does (the name is then ambiguous); otherwise empty."""
+        for candidate in self._name_candidates(name):
+            if candidate in self._ambiguous:
+                return list(self._ambiguous[candidate])
+            if candidate in self._units:
+                return []
+        return []
+
+    def _name_candidates(self, name: str) -> list[str]:
+        return [name.casefold(), *(f"{ns}.{name}".casefold() for ns in self._namespaces)]
 
     def unit(self, name: str) -> UnitSymbols | None:
         resolved = self.resolve_unit_name(name)
         return self._units[resolved.casefold()] if resolved else None
 
     def unit_of_file(self, source_file: str) -> str | None:
-        return self._files.get(_norm_path(source_file))
+        """Unit of a scanned file. An include file belongs to the unit that
+        includes it; when several units include it, it has no unit."""
+        key = _norm_path(source_file)
+        found = self._files.get(key)
+        if found is not None:
+            return found
+        owners = self._include_owners.get(key, [])
+        return owners[0] if len(owners) == 1 else None
 
     def type(self, qualified: str) -> TypeSymbols | None:
         return self._types.get(qualified.casefold())
@@ -287,25 +313,35 @@ class SymbolTable:
             if target is not None:
                 found = self._unit_types[target.casefold()].get(short.casefold())
                 return found.qualified if found else None
-        for candidate in self._search_order(unit):
-            found = self._unit_types.get(candidate.casefold(), {}).get(name.casefold())
-            if found is not None:
-                return found.qualified
+        for candidates in self._search_order(unit):
+            hits = [
+                found for c in candidates
+                if (found := self._unit_types.get(c.casefold(), {}).get(name.casefold()))
+            ]
+            if hits:
+                # A duplicated unit that declares the name leaves it ambiguous.
+                return hits[0].qualified if len(candidates) == 1 else None
         return None
 
-    def _search_order(self, unit: str) -> list[str]:
-        """Own unit, implementation uses then interface uses (last first), then System."""
+    def _search_order(self, unit: str) -> list[list[str]]:
+        """Own unit, implementation uses then interface uses (last first), then System.
+
+        Each entry lists the units behind one name: a single unit, or every
+        block of a unit name that several scanned files declare.
+        """
+        implicit = self.resolve_unit_name(_IMPLICIT_UNIT)
         own = self.unit(unit)
         if own is None:
-            return [implicit] if (implicit := self.resolve_unit_name(_IMPLICIT_UNIT)) else []
-        order = [own.name]
+            return [[implicit]] if implicit else []
+        order = [[own.name]]
         for used in (*reversed(own.implementation_uses), *reversed(own.interface_uses)):
             resolved = self.resolve_unit_name(used)
             if resolved is not None:
-                order.append(resolved)
-        implicit = self.resolve_unit_name(_IMPLICIT_UNIT)
+                order.append([resolved])
+            elif dups := self.duplicates(used):
+                order.append(dups)
         if implicit is not None:
-            order.append(implicit)
+            order.append([implicit])
         return order
 
     def ancestors(self, qualified_type: str) -> list[str]:
@@ -359,12 +395,11 @@ class SymbolTable:
     def declares_type(self, unit: str, name: str) -> bool:
         """Whether `unit` itself declares a type (or procedure type) `name`."""
         resolved = self.resolve_unit_name(unit)
-        if resolved is None:
-            return False
-        key = resolved.casefold()
-        return (
-            name.casefold() in self._unit_types.get(key, {})
-            or name.casefold() in self._proc_types.get(key, ())
+        units = [resolved] if resolved is not None else self.duplicates(unit)
+        return any(
+            name.casefold() in self._unit_types.get(u.casefold(), {})
+            or name.casefold() in self._proc_types.get(u.casefold(), ())
+            for u in units
         )
 
     def caller_class(self, unit: str, enclosing: Sequence[str]) -> str | None:
@@ -413,7 +448,9 @@ class SymbolTable:
             prefix, _, short = type_name.rpartition(".")
             target = self.resolve_unit_name(prefix)
             return target is not None and short.casefold() in self._proc_types[target.casefold()]
-        return any(
-            type_name.casefold() in self._proc_types.get(candidate.casefold(), ())
-            for candidate in self._search_order(unit)
-        )
+        for candidates in self._search_order(unit):
+            if any(type_name.casefold() in self._proc_types.get(c.casefold(), ())
+                   for c in candidates):
+                # Ambiguous through a duplicated unit: not known to be one.
+                return len(candidates) == 1
+        return False

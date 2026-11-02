@@ -210,3 +210,19 @@ def test_duplicate_unit_name_keeps_each_file_and_is_ambiguous_by_name():
     assert t.resolve_unit_name("Dup") is None
     assert t.unit("dup") is None
     assert t.routines("Dup", "Foo", interface_only=True) == []
+
+
+def test_duplicate_unit_in_uses_makes_type_lookups_ambiguous():
+    first = {**_unit_block("Dup", "C:/a/Dup.pas", "Foo", "a_foo"),
+             "types": {"TThing": {"kind": "class", "ancestor": None, "members": {}}}}
+    second = _unit_block("Dup", "C:/b/Dup.pas", "Foo", "b_foo")
+    other = {**_unit_block("Other", "C:/o/Other.pas", "Bar", "bar"),
+             "types": {"TThing": {"kind": "class", "ancestor": None, "members": {}}}}
+    caller = {**_unit_block("Caller", "C:/c/Caller.pas", "Baz", "baz"),
+              "interface_uses": ["Other", "Dup"]}
+    t = SymbolTable.from_sources([first, second, other, caller], None)
+    assert [len(t.duplicates(n)) for n in ("Dup", "dup", "Other")] == [2, 2, 0]
+    # `Dup` comes last and one of its files declares TThing: no certain answer.
+    assert t.lookup_type("Caller", "TThing") is None
+    assert t.declares_type("Dup", "TThing") is True
+    assert t.declares_type("Dup", "TNope") is False

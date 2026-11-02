@@ -204,3 +204,76 @@ def test_symbol_file_targets_give_no_edge_yet(run, monkeypatch):
     monkeypatch.setattr(pascal_resolution, "load_delphi_symbols", lambda *a, **k: symbols)
     g = run("Casts.pas", "Basis.pas")
     assert _calls_from(g, "Casts.pas", "Klik()") == []
+
+
+def _with_symbols(monkeypatch):
+    import json
+
+    from graphify import pascal_resolution
+
+    symbols = json.loads((FIXTURES / "delphi-test.symbols.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(pascal_resolution, "load_delphi_symbols", lambda *a, **k: symbols)
+
+
+def test_duplicated_unit_in_uses_stops_the_search(run):
+    # `Dup` is declared by two files and comes last in the uses: the compiler
+    # would take its `Doe`, which one is ambiguous, so UnitA.Doe is never right.
+    g = run("UnitA.pas", "dup_a/Dup.pas", "dup_b/Dup.pas", "UsesDup.pas")
+    assert _calls_from(g, "UsesDup.pas", "Test()") == []
+
+
+def test_call_in_include_resolves_in_including_unit(run):
+    g = run("IncMain.pas", "inc_code.inc")
+    edge = _call(g, ("inc_code.inc", "B()"), ("IncMain.pas", "A()"))
+    assert edge is not None and edge["rule"] == "5.1/4"
+    assert _call(g, ("IncMain.pas", "C()"), ("inc_code.inc", "B()")) is not None
+
+
+def test_include_shared_by_several_units_gives_no_edge(run):
+    g = run("IncOne.pas", "IncTwo.pas", "inc_shared.inc")
+    assert _calls_from(g, "inc_shared.inc", "B()") == []
+
+
+def test_own_type_shadows_routine_of_used_unit(run):
+    g = run("ShadowLib.pas", "Shadow.pas")
+    assert _calls_from(g, "Shadow.pas", "Cast()") == []
+
+
+def test_own_field_shadows_routine_of_used_unit(run):
+    g = run("ShadowLib.pas", "Shadow.pas")
+    assert _calls_from(g, "Shadow.pas", "Event()") == []
+
+
+def test_symbol_file_ancestor_member_shadows_routine_of_used_unit(run, monkeypatch):
+    _with_symbols(monkeypatch)
+    g = run("ShadowLib.pas", "Shadow.pas")
+    assert _calls_from(g, "Shadow.pas", "Sluit()") == []
+    assert _calls_from(g, "Shadow.pas", "Cast()") == []
+    assert _calls_from(g, "Shadow.pas", "Event()") == []
+
+
+def _member(name: str, params: int, min_params: int | None = None, nid: str | None = None):
+    from graphify.pascal_symbols import Member
+
+    return Member(
+        name=name, kind="method", vis="public", params=params,
+        min_params=params if min_params is None else min_params, type=None,
+        proc_type=False, nid=nid or f"{name}/{params}", owner="U.T", unit="U",
+    )
+
+
+def test_outcome_picks_the_overload_by_arity():
+    from graphify.pascal_resolution import DelphiResolver, _arity_fits
+
+    zero, one, two = _member("Laad", 0), _member("Laad", 1), _member("Laad", 2)
+    assert _arity_fits(one, 1) and not _arity_fits(one, 2)
+    optional = _member("Laad", 3, min_params=1)
+    assert _arity_fits(optional, 1) and _arity_fits(optional, 3) and not _arity_fits(optional, 0)
+    for count, chosen in ((0, zero), (1, one), (2, two)):
+        res = DelphiResolver._outcome([zero, one, two], count, "5.1/2")
+        assert (res.target, res.confidence, res.score) == (chosen.nid, "EXTRACTED", 1.0)
+    # Two overloads fit one argument: the first candidate, INFERRED.
+    res = DelphiResolver._outcome([optional, one], 1, "5.1/2")
+    assert (res.target, res.confidence, res.score) == (optional.nid, "INFERRED", 0.85)
+    res = DelphiResolver._outcome([two, one], None, "5.1/2")
+    assert (res.target, res.confidence) == (two.nid, "INFERRED")

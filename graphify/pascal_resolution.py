@@ -116,6 +116,7 @@ class DelphiResolver:
             for used in reversed(uses):
                 resolved = table.resolve_unit_name(used)
                 if resolved is None:
+                    self._check_duplicates(used, name)
                     continue
                 hit = self._unit_scope(resolved, name, arg_count, rule, interface_only=True)
                 if hit is not None:
@@ -152,6 +153,18 @@ class DelphiResolver:
             if found:
                 return self._outcome(found, arg_count, "5.1/3" if prefix == "5.1" else prefix)
         return None
+
+    def _check_duplicates(self, used: str, name: str) -> None:
+        """A unit name declared by several scanned files: if any of them knows
+        `name`, which one the compiler would take is unknown, so stop."""
+        table = self.table
+        for dup in table.duplicates(used):
+            if (
+                table.declares_type(dup, name)
+                or table.routines(dup, name, interface_only=True)
+                or table.global_var(dup, name) is not None
+            ):
+                raise _Stop
 
     def _unit_scope(
         self, unit: str, name: str, arg_count: int | None, rule: str, *, interface_only: bool,
