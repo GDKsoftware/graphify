@@ -687,7 +687,11 @@ def extract_pascal(path: Path) -> dict:
     try:
         language = Language(tspascal.language())
         parser = Parser(language)
-        source = _read_source_bytes(path)
+        # tree-sitter-pascal lexes a quote run inside a line (`'f(''' + A`) as
+        # the opening of a Delphi 12 multiline string and loses the rest of
+        # the file. Parse with the string contents blanked: line breaks and
+        # delimiters stay, and no name the extractor reads lives in a literal.
+        source = _pascal_mask_strings(_read_source_bytes(path).decode("utf-8")).encode("utf-8")
         tree = parser.parse(source)
         root = tree.root_node
     except Exception:

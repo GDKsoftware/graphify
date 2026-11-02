@@ -157,6 +157,31 @@ def test_multiline_string_keeps_following_calls(extractor, monkeypatch, tmp_path
     assert _call_line(r, "Doe2()", "Tweede()") == _line_of(MULTILINE, "Tweede;")
 
 
+QUOTE_RUN = FIXTURES / "QuoteRun.pas"
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_quote_run_inside_a_line_keeps_the_unit_and_its_routines(extractor):
+    # `'f(''' + A + ''',' + B + ')'`: a string that ends in a doubled quote,
+    # so `'''` sits in the middle of a line. tree-sitter-pascal lexes that run
+    # as the opening of a Delphi 12 multiline string and loses the rest of the
+    # file: the unit node, every routine after it and with them the symbol
+    # block the call resolver reads.
+    r = extractor(QUOTE_RUN)
+    labels = set(_labels(r["nodes"]).values())
+    assert {"QuoteRun", "Plak()", "Bouw()", "Verder()"} <= labels
+    assert any("_pascal_unit" in n for n in r["nodes"])
+    assert {"plak", "verder"} <= _raw_callees(r)
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_quote_run_inside_a_line_keeps_the_calls(extractor, monkeypatch, tmp_path):
+    r = _graph(extractor, QUOTE_RUN, monkeypatch, tmp_path)
+    assert {"Plak()", "Verder()"} <= _called_labels(r, "Bouw()")
+    assert _call_line(r, "Bouw()", "Verder()") == _line_of(QUOTE_RUN, "Verder;")
+    assert "Plak()" in _called_labels(r, "Verder()")
+
+
 def test_uses_in_path_survives_masking():
     # Only the regex extractor masks strings; the `'Helpers.pas'` path of a
     # `uses ... in` clause must not lose the unit name to the mask.
