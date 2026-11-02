@@ -73,8 +73,9 @@ def make_raw_call(
     arg_count: int | None,
     enclosing_routines: list[str],
     local_receiver: bool = False,
+    with_stack: list[dict] | None = None,
 ) -> dict:
-    """Build a Pascal raw call (spec section 4.2, without ``with_stack``)."""
+    """Build a Pascal raw call (spec section 4.2)."""
     return {
         "language": "pascal",
         "source_file": source_file,
@@ -88,6 +89,7 @@ def make_raw_call(
         "is_member_call": local_receiver or is_expression_receiver(qualifier),
         "arg_count": arg_count,
         "enclosing_routines": enclosing_routines,
+        "with_stack": with_stack or [],
     }
 
 
@@ -96,3 +98,18 @@ def is_local_receiver(qualifier: str | None, shadow: set[str]) -> bool:
     if not qualifier or qualifier.lower() in ("self", "inherited"):
         return False
     return qualifier.split(".", 1)[0].strip().lower() in shadow
+
+
+_HEAD_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def with_item(expr_text: str, *, multi: bool, shadow: set[str]) -> dict:
+    """One ``with_stack`` item: ``{"expr", "multi"}``, plus ``"local": True``
+    when the head of the expression is a parameter or local of the caller (its
+    type is then unknown to the resolver)."""
+    expr = _DOT_SPACE_RE.sub(".", " ".join(expr_text.split()))
+    item: dict = {"expr": expr, "multi": multi}
+    head = _HEAD_RE.match(expr)
+    if head and head.group(0).lower() in shadow:
+        item["local"] = True
+    return item

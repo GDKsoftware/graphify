@@ -24,6 +24,7 @@ edge (spec 5.5).
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -33,6 +34,8 @@ from .pascal_symbols import Member, Routine, SymbolTable, load_delphi_symbols
 RESOLVED_BY = "delphi_scope"
 _IMPLICIT_UNITS = ("System", "SysInit")
 _RANK = {"EXTRACTED": 2, "INFERRED": 1}
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+_CREATE_RE = re.compile(r"([A-Za-z_]\w*)\s*\.\s*Create\s*(?:\(.*\))?", re.IGNORECASE | re.DOTALL)
 
 
 def _namespaces() -> list[str]:
@@ -103,15 +106,17 @@ class DelphiResolver:
         unit = self.table.unit_of_file(str(rc.get("source_file") or ""))
         if unit is None:
             return None
-        if rc.get("with_stack"):
-            return None  # names inside `with` may be members of the with-object
         qualifier = rc.get("qualifier")
         if rc.get("is_member_call") or is_expression_receiver(qualifier):
             return None
         enclosing: Sequence[str] = rc.get("enclosing_routines") or ()
         arg_count = rc.get("arg_count")
+        with_stack = rc.get("with_stack") or ()
         try:
-            res = self._resolve_scoped(unit, enclosing, qualifier, callee, arg_count)
+            if with_stack:
+                res = self._resolve_in_with(unit, enclosing, with_stack, qualifier, callee, arg_count)
+            else:
+                res = self._resolve_scoped(unit, enclosing, qualifier, callee, arg_count)
         except _Stop:
             return None
         if res is None or res.external_unit is None:
@@ -135,6 +140,72 @@ class DelphiResolver:
             cls = self.table.caller_class(unit, enclosing)
             return self._class_scope(unit, cls, callee, arg_count, own=False, prefix="5.2/2")
         return self._qualified(unit, enclosing, qualifier, callee, arg_count)
+
+    # ------------------------------------------------- inside `with` (5.3)
+
+    def _resolve_in_with(
+        self, unit: str, enclosing: Sequence[str], with_stack: Sequence[dict],
+        qualifier: str | None, callee: str, arg_count: int | None,
+    ) -> Resolution | None:
+        """Spec 5.3. The name may be a member of the with-object, so only a
+        single `with` of a known type gives an edge.
+
+        A qualified call is not looked at either: its head may be a member of the
+        with-object too. Only `Self` and `inherited` are certain not to be, and
+        they resolve as outside a `with`. Rules: 5.3/1 is a member of the type of
+        the `with` expression, 5.3/2 a name that the type lacks and 5.1 finds.
+        """
+        if qualifier is not None:
+            if qualifier.casefold() in ("self", "inherited"):
+                return self._resolve_scoped(unit, enclosing, qualifier, callee, arg_count)
+            return None
+        if len(with_stack) != 1 or with_stack[0].get("multi") or with_stack[0].get("local"):
+            return None
+        with_type = self._with_type(unit, enclosing, str(with_stack[0].get("expr") or ""))
+        if with_type is None:
+            return None
+        cls = self.table.caller_class(unit, enclosing)
+        hit = self._type_scope(unit, cls, with_type, callee, arg_count, "5.3/1")
+        if hit is None:
+            hit = self._unqualified(unit, enclosing, callee, arg_count)
+            if hit is not None:
+                hit = replace(hit, rule="5.3/2")
+        if hit is None:
+            return None
+        # The type may be known only in part, so even a unique hit is inferred.
+        if hit.confidence == "EXTRACTED":
+            return replace(hit, confidence="INFERRED", score=0.95)
+        return hit
+
+    def _with_type(self, unit: str, enclosing: Sequence[str], expr: str) -> str | None:
+        """Qualified type of a `with` expression, or None when it is not known.
+
+        Known are `TFoo.Create`, a global variable, a type name and a field of
+        the caller's class with a declared type. Raises `_Stop` where the head
+        names several things that are not told apart (as for a qualifier).
+        """
+        table = self.table
+        created = _CREATE_RE.fullmatch(expr)
+        if created:
+            return table.lookup_type(unit, created.group(1))
+        if not _IDENT_RE.fullmatch(expr):
+            return None
+        cls = table.caller_class(unit, enclosing)
+        own_field = self._own_field(unit, cls, expr)
+        global_type = self._global_type(unit, expr)
+        type_name = table.lookup_type(unit, expr)
+        known = global_type if global_type is not None else type_name
+        if known is not None:
+            if own_field is not None:
+                raise _Stop
+            return known
+        if own_field is None:
+            return None
+        if own_field.kind not in ("field", "property") or own_field.proc_type or not own_field.type:
+            return None
+        if table.is_proc_typed(own_field.owner, own_field.name):
+            return None
+        return table.lookup_type(own_field.unit, own_field.type)
 
     # ------------------------------------------------------------ the rules
 

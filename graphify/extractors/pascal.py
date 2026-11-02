@@ -8,6 +8,7 @@ from graphify.extractors.pascal_calls import (
     count_args,
     is_local_receiver,
     make_raw_call,
+    with_item,
     split_callee,
 )
 from graphify.extractors.resolution import _pascal_resolve_class, _pascal_resolve_unit
@@ -217,6 +218,77 @@ def _pascal_block_end(text: str, body_start: int) -> int:
             if depth == 0:
                 return tok.start()
     return len(text)
+
+_PAS_WITH_RE = re.compile(r"\bwith\b(?P<expr>.*?)\bdo\b", re.IGNORECASE | re.DOTALL)
+_PAS_WITH_END_TOKEN_RE = re.compile(
+    r"\b(begin|case|try|asm|record|repeat|end|until|except|finally|if|else)\b|[;()\[\]]",
+    re.IGNORECASE,
+)
+_PAS_BEGIN_AT_RE = re.compile(r"\s*begin\b", re.IGNORECASE)
+
+
+def _pascal_with_end(text: str, start: int) -> int:
+    """Offset where the statement of a `with ... do` that starts at ``start`` ends.
+
+    `do begin` runs to its matching `end`. Any other statement runs to the next
+    `;` or `else` outside nested begin/case/try/repeat blocks and parentheses;
+    an `else` that belongs to an `if` inside the statement does not end it.
+    """
+    bm = _PAS_BEGIN_AT_RE.match(text, start)
+    if bm:
+        return _pascal_block_end(text, bm.end())
+    depth = parens = ifs = 0
+    for tok in _PAS_WITH_END_TOKEN_RE.finditer(text, start):
+        t = tok.group(0).lower()
+        if t in ("(", "["):
+            parens += 1
+        elif t in (")", "]"):
+            parens -= 1
+        elif parens > 0:
+            continue
+        elif t in ("begin", "case", "try", "asm", "record", "repeat"):
+            depth += 1
+        elif t in ("end", "until"):
+            if depth == 0:
+                return tok.start()
+            depth -= 1
+        elif depth > 0:
+            continue
+        elif t == ";":
+            return tok.start()
+        elif t == "if":
+            ifs += 1
+        elif t == "else":
+            if ifs == 0:
+                return tok.start()
+            ifs -= 1
+        elif t in ("except", "finally"):
+            return tok.start()
+    return len(text)
+
+
+def _pascal_is_multi_with(expr: str) -> bool:
+    """Whether the expression list of a `with` has more than one expression."""
+    depth = 0
+    for ch in expr:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
+def _pascal_with_ranges(body_text: str, shadow: set[str]) -> list[tuple[int, int, dict]]:
+    """(start, end, with_stack item) of every `with` statement in a routine body."""
+    ranges = []
+    for m in _PAS_WITH_RE.finditer(body_text):
+        expr = m.group("expr")
+        item = with_item(expr, multi=_pascal_is_multi_with(expr), shadow=shadow)
+        ranges.append((m.end(), _pascal_with_end(body_text, m.end()), item))
+    return ranges
+
 
 @dataclass
 class _PascalRoutine:
@@ -537,6 +609,7 @@ def _extract_pascal_regex(path: Path) -> dict:
     raw_calls: list[dict] = []
     for caller_nid, body_line, body_text, _container, _name_lower in impl_records:
         chain, shadow, method_name = impl_scope[caller_nid]
+        with_ranges = _pascal_with_ranges(body_text, shadow)
         for cm in _PAS_CALL_RE.finditer(body_text):
             call_line = body_line + body_text.count("\n", 0, cm.start())
             arg_count: int | None = 0
@@ -562,6 +635,13 @@ def _extract_pascal_regex(path: Path) -> dict:
                 callee=callee_name, qualifier=qualifier, arg_count=arg_count,
                 enclosing_routines=chain,
                 local_receiver=is_local_receiver(qualifier, shadow),
+                # innermost `with` first: the one that starts last
+                with_stack=[
+                    item for _s, _e, item in sorted(
+                        (r for r in with_ranges if r[0] <= cm.start() < r[1]),
+                        key=lambda r: r[0], reverse=True,
+                    )
+                ],
             ))
 
     result = {
@@ -857,6 +937,7 @@ def extract_pascal(path: Path) -> dict:
 
     def _emit_or_report(
         caller_nid: str, callee: str, qualifier: str | None, line: int, arg_count: int | None,
+        withs: list[dict],
     ) -> None:
         # A parameter or local of the caller (or an enclosing routine) is not
         # a routine call.
@@ -867,24 +948,42 @@ def extract_pascal(path: Path) -> dict:
             qualifier=qualifier, arg_count=arg_count,
             enclosing_routines=proc_scope[caller_nid][0],
             local_receiver=is_local_receiver(qualifier, proc_scope[caller_nid][1]),
+            with_stack=withs,
         ))
 
     def _call_site(
         caller_nid: str, callee_text: str, line: int, arg_count: int | None,
+        withs: list[dict],
     ) -> None:
         qualifier, callee = split_callee(callee_text)
         callee = re.sub(r"<.*$", "", callee).strip()
         if re.fullmatch(r"[A-Za-z_]\w*", callee):
-            _emit_or_report(caller_nid, callee, qualifier, line, arg_count)
+            _emit_or_report(caller_nid, callee, qualifier, line, arg_count, withs)
 
-    def _inherited_site(caller_nid: str, node, line: int, arg_count: int | None) -> None:  # type: ignore[no-untyped-def]
+    def _inherited_site(  # type: ignore[no-untyped-def]
+        caller_nid: str, node, line: int, arg_count: int | None, withs: list[dict],
+    ) -> None:  # type: ignore[no-untyped-def]
         # `inherited Foo` names the method; a bare `inherited` repeats the name
         # of the current (outermost enclosing) method.
         ident = next((c for c in node.children if c.type == "identifier"), None)
         callee = _read(ident) if ident else proc_scope[caller_nid][2]
-        _emit_or_report(caller_nid, callee, "inherited", line, arg_count)
+        _emit_or_report(caller_nid, callee, "inherited", line, arg_count, withs)
 
-    def walk_calls(node, caller_nid: str) -> None:  # type: ignore[no-untyped-def]
+    def _with_item(node, caller_nid: str) -> dict:  # type: ignore[no-untyped-def]
+        """`with_stack` item of a `with` node: the expressions between `with` and `do`."""
+        exprs = []
+        for child in node.children:
+            if child.type == "kDo":
+                break
+            if child.is_named and child.type != "kWith":
+                exprs.append(child)
+        text = source[exprs[0].start_byte:exprs[-1].end_byte].decode("utf-8", "replace") if exprs else ""
+        return with_item(text, multi=len(exprs) > 1, shadow=proc_scope[caller_nid][1])
+
+    def walk_calls(  # type: ignore[no-untyped-def]
+        node, caller_nid: str, withs: list[dict] | None = None,
+    ) -> None:
+        withs = withs or []
         if node.type == "defProc":
             return  # a nested routine is its own caller
         line = node.start_point[0] + 1
@@ -895,9 +994,9 @@ def extract_pascal(path: Path) -> dict:
             arg_count = len(_named(args)) if args is not None else 0
             if callee_node is not None:
                 if callee_node.type == "inherited":
-                    _inherited_site(caller_nid, callee_node, line, arg_count)
+                    _inherited_site(caller_nid, callee_node, line, arg_count, withs)
                 else:
-                    _call_site(caller_nid, _read(callee_node), line, arg_count)
+                    _call_site(caller_nid, _read(callee_node), line, arg_count, withs)
         elif node.type == "statement":
             # A call without parentheses: `Reset;`, `Unit1.Foo.Bar;`, `inherited;`.
             # tree-sitter has no exprCall wrapper for these.
@@ -905,22 +1004,31 @@ def extract_pascal(path: Path) -> dict:
             if len(named) == 1:
                 only = named[0]
                 if only.type == "identifier":
-                    _emit_or_report(caller_nid, _read(only), None, line, 0)
+                    _emit_or_report(caller_nid, _read(only), None, line, 0, withs)
                 elif only.type == "exprDot":
-                    _call_site(caller_nid, _read(only), line, 0)
+                    _call_site(caller_nid, _read(only), line, 0, withs)
                 elif only.type == "inherited":
-                    _inherited_site(caller_nid, only, line, 0)
+                    _inherited_site(caller_nid, only, line, 0, withs)
         elif node.type == "assignment":
             # `F := TFoo.Create;` calls without parentheses on the right-hand
             # side; the regex extractor reports them too.
             named = _named(node)
             rhs = named[-1] if len(named) >= 2 else None
             if rhs is not None and rhs.type == "identifier":
-                _emit_or_report(caller_nid, _read(rhs), None, line, 0)
+                _emit_or_report(caller_nid, _read(rhs), None, line, 0, withs)
             elif rhs is not None and rhs.type == "exprDot":
-                _call_site(caller_nid, _read(rhs), line, 0)
+                _call_site(caller_nid, _read(rhs), line, 0, withs)
+        if node.type == "with":
+            # The expressions are evaluated outside the block; the statement
+            # after `do` sees the new innermost with-object.
+            inner = [_with_item(node, caller_nid), *withs]
+            after_do = False
+            for child in node.children:
+                walk_calls(child, caller_nid, inner if after_do else withs)
+                after_do = after_do or child.type == "kDo"
+            return
         for child in node.children:
-            walk_calls(child, caller_nid)
+            walk_calls(child, caller_nid, withs)
 
     for proc_nid, body_node, _container, _name_lower in proc_bodies:
         walk_calls(body_node, proc_nid)

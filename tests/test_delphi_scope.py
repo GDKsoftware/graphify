@@ -496,3 +496,49 @@ def test_used_unit_implementation_const_does_not_shadow(run):
 def test_enumeration_value_is_not_a_call(run):
     g = _const_run(run)
     assert _calls_from(g, "ConstUsed.pas", "TestEnum()") == []
+
+
+# ------------------------------------------------------------------ with (5.3)
+
+
+def _with_targets(graph: dict) -> list[tuple[str, dict]]:
+    src = _routine(graph, "WithBlok.pas", "Test()")["id"]
+    return [
+        (str(_node(graph, e["target"]).get("id")), e)
+        for e in graph["edges"] if e["relation"] == "calls" and e["source"] == src
+    ]
+
+
+def test_with_known_type_is_inferred_095(run):
+    g = run("Main.pas", "WithBlok.pas")
+    hits = {t: e for t, e in _with_targets(g)}
+    bar = next(t for t in hits if t.endswith("tfoo_bar"))
+    assert hits[bar]["confidence"] == "INFERRED" and hits[bar]["confidence_score"] == 0.95
+    assert hits[bar]["rule"].startswith("5.3")
+    doe = next(t for t in hits if t.endswith("doeiets"))
+    assert hits[doe]["confidence"] == "INFERRED" and hits[doe]["confidence_score"] == 0.95
+
+
+def test_with_unknown_type_gives_no_edge(run):
+    g = run("Main.pas", "WithBlok.pas")
+    # `with GetObj do Bar` must not fall back to the unit-level routine Bar.
+    assert not [t for t, _e in _with_targets(g) if t.endswith("withblok_bar")]
+
+
+def test_with_multi_gives_no_edge(run):
+    g = run("Main.pas", "WithBlok.pas")
+    targets = [t for t, _e in _with_targets(g)]
+    # Five `with` calls: only the first Bar and DoeIets bind.
+    assert len(targets) == 2, targets
+
+
+def test_nested_with_gives_no_edge(run):
+    g = run("Main.pas", "WithBlok.pas")
+    bars = [e for t, e in _with_targets(g) if t.endswith("tfoo_bar")]
+    assert len(bars) == 1
+    assert bars[0]["source_location"] == "L29"
+
+
+def test_with_on_local_variable_gives_no_edge(run):
+    g = run("Main.pas", "WithBlok.pas")
+    assert _calls_from(g, "WithBlok.pas", "Lokaal()") == []

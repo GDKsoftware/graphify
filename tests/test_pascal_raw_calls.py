@@ -67,7 +67,7 @@ def test_make_raw_call_schema():
     assert rc == {
         "language": "pascal", "source_file": "x.pas", "source_location": "L7",
         "caller_nid": "n", "callee": "Foo", "qualifier": "Self",
-        "is_member_call": False, "arg_count": 1, "enclosing_routines": ["TA.B"],
+        "is_member_call": False, "arg_count": 1, "enclosing_routines": ["TA.B"], "with_stack": [],
     }
     unit_call = make_raw_call(
         source_file="x.pas", line=1, caller_nid="n", callee="Foo", qualifier="Unit1",
@@ -170,3 +170,67 @@ def test_bare_inherited_in_nested_routine_names_the_method(extractor):
     inherited = [c for c in r["raw_calls"] if c["qualifier"] == "inherited"]
     assert [c["callee"] for c in inherited] == ["M"]
     assert inherited[0]["enclosing_routines"] == ["TBar.M.Inner", "TBar.M"]
+
+
+WITH_BLOK = Path(__file__).parent / "fixtures" / "delphi_scope" / "WithBlok.pas"
+
+
+def _with_stacks(result: dict) -> list[tuple[str, int | None, list]]:
+    return [
+        (rc["callee"], rc["source_location"], rc["with_stack"])
+        for rc in result["raw_calls"]
+        if rc["caller_nid"] == _make_id(_file_stem(WITH_BLOK), "Test")
+        and rc["callee"].lower() in ("bar", "doeiets")
+    ]
+
+
+@pytest.mark.parametrize("extract", [p.values[0] for p in _extractors()],
+                         ids=["tree-sitter", "regex"])
+def test_with_stack_records_expression(extract):
+    stacks = [(c, ws) for c, _loc, ws in _with_stacks(extract(WITH_BLOK))]
+    assert stacks[0] == ("Bar", [{"expr": "TFoo.Create", "multi": False}])
+    assert stacks[1] == ("Bar", [{"expr": "GetObj", "multi": False}])
+    assert stacks[2] == ("DoeIets", [{"expr": "frmMain", "multi": False}])
+    assert stacks[3] == ("Bar", [{"expr": "A, B", "multi": True}])
+    assert stacks[4] == ("Bar", [
+        {"expr": "GetObj", "multi": False}, {"expr": "TFoo.Create", "multi": False},
+    ])
+
+
+@pytest.mark.parametrize("extract", [p.values[0] for p in _extractors()],
+                         ids=["tree-sitter", "regex"])
+def test_with_stack_local_head_is_flagged(extract):
+    rc = next(
+        rc for rc in extract(WITH_BLOK)["raw_calls"]
+        if rc["callee"] == "DoeIets" and rc["caller_nid"].endswith("lokaal")
+    )
+    assert rc["with_stack"] == [{"expr": "frmMain", "multi": False, "local": True}]
+
+
+def test_with_stack_parity_between_extractors():
+    from graphify.extract import _extract_pascal_regex, extract_pascal
+
+    assert _with_stacks(extract_pascal(WITH_BLOK)) == _with_stacks(_extract_pascal_regex(WITH_BLOK))
+    both = [
+        [rc["with_stack"] for rc in r["raw_calls"]]
+        for r in (extract_pascal(WITH_BLOK), _extract_pascal_regex(WITH_BLOK))
+    ]
+    assert both[0] == both[1]
+
+
+def test_with_stack_ends_with_the_statement(tmp_path):
+    from graphify.extract import _extract_pascal_regex, extract_pascal
+
+    NL = chr(10)
+    src = tmp_path / "Ends.pas"
+    src.write_text(
+        "unit Ends;" + NL + "interface" + NL + "implementation" + NL + "procedure T;" + NL + "begin" + NL
+        + "  with X do if a then Foo(1) else Baz;" + NL + "  Qux;" + NL
+        + "  with Y do begin case n of 1: Zed; end; Zap; end;" + NL + "  Last;" + NL + "end;" + NL + "end." + NL
+    )
+    for extract in (extract_pascal, _extract_pascal_regex):
+        got = {rc["callee"]: [w["expr"] for w in rc["with_stack"]] for rc in extract(src)["raw_calls"]}
+        assert got["Foo"] == ["X"] and got["Baz"] == ["X"], extract
+        assert got["Qux"] == [], extract
+        assert got["Zed"] == ["Y"] and got["Zap"] == ["Y"], extract
+        assert got["Last"] == [], extract
