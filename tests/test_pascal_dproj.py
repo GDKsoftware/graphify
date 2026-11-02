@@ -225,3 +225,108 @@ def test_include_found_via_unit_search_path(extractor, tmp_path, caplog):
 
     _activate(project, "pascal.dproj=Project.dproj\n")
     assert "inc_code" in str(body_nid())
+
+
+# ------------------------------------------------------- cache and robustness
+
+
+def _unit_with_search_path_include(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "inc").mkdir()
+    (project / "inc2").mkdir()
+    shutil.copy(FIXTURES / "IncMain.pas", project / "src" / "IncMain.pas")
+    for d in ("inc", "inc2"):
+        shutil.copy(FIXTURES / "inc_code.inc", project / d / "inc_code.inc")
+    return project, project / "src" / "IncMain.pas"
+
+
+def _dproj(project: Path, name: str, directory: str) -> None:
+    (project / name).write_text(
+        '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+        f"<PropertyGroup><DCC_UnitSearchPath>{directory}</DCC_UnitSearchPath>"
+        "</PropertyGroup></Project>",
+        encoding="utf-8",
+    )
+
+
+def test_cached_pascal_file_is_reextracted_when_search_path_changes(
+    extractor, tmp_path, caplog
+):
+    project, unit = _unit_with_search_path_include(tmp_path)
+    (project / "empty").mkdir()
+    cache = tmp_path / "cache"
+
+    def run_warns() -> bool:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            extract([unit], cache_root=cache, root=project, parallel=False)
+        return "include file not found" in caplog.text
+
+    assert run_warns()      # no .dproj: include not found, result is cached
+    assert not run_warns()  # served from the cache
+    _dproj(project, "Project.dproj", "empty")
+    (project / ".graphifyrc").write_text("pascal.dproj=Project.dproj\n", encoding="utf-8")
+    assert run_warns()      # new search path: the cached entry is not reused
+    assert not run_warns()
+    _dproj(project, "Project.dproj", "inc")
+    assert not run_warns()  # changed path re-extracted, and now finds the include
+
+
+def test_cache_salt_is_none_without_search_path_or_for_other_languages(tmp_path):
+    project, unit = _unit_with_search_path_include(tmp_path)
+    assert rcfile.cache_salt(unit) is None
+    _dproj(project, "Project.dproj", "inc")
+    _activate(project, "pascal.dproj=Project.dproj\n")
+    assert "pascal_dirs=" in rcfile.cache_salt(unit)
+    assert rcfile.cache_salt(project / "x.py") is None
+
+
+@pytest.mark.parametrize("content", [b"not gzip at all", None])
+def test_corrupt_symbol_file_warns_and_falls_back(tmp_path, data_dir, caplog, content):
+    _write_symbols(data_dir, "13.2")
+    bad = tmp_path / "bad.symbols.json.gz"
+    if content is None:  # valid gzip, invalid JSON
+        with gzip.open(bad, "wt", encoding="utf-8") as f:
+            f.write("{oops")
+    else:
+        bad.write_bytes(content)
+    _activate(tmp_path, "pascal.delphi_symbols=bad.symbols.json.gz\n")
+    with caplog.at_level(logging.WARNING):
+        assert load_delphi_symbols()["delphi_version"] == "13.2"
+    assert "bad.symbols.json.gz" in caplog.text
+
+
+def test_corrupt_symbol_file_without_bundled_files_gives_none(tmp_path, data_dir, caplog):
+    (tmp_path / "bad.symbols.json.gz").write_bytes(b"junk")
+    _activate(tmp_path, "pascal.delphi_symbols=bad.symbols.json.gz\n")
+    with caplog.at_level(logging.WARNING):
+        assert load_delphi_symbols() is None
+
+
+def test_pool_hands_its_workers_the_pascal_settings(tmp_path, monkeypatch):
+    import concurrent.futures
+
+    from graphify.extract import _worker_init
+
+    project, _unit = _unit_with_search_path_include(tmp_path)
+    _dproj(project, "Project.dproj", "inc")
+    (project / ".graphifyrc").write_text("pascal.dproj=Project.dproj\n", encoding="utf-8")
+    seen: dict = {}
+
+    class RecordingPool(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, max_workers=None, initializer=None, initargs=(), **kw):
+            seen["initializer"] = initializer
+            seen["initargs"] = initargs
+            super().__init__(max_workers=max_workers, initializer=initializer, initargs=initargs)
+
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", RecordingPool)
+    files = []
+    for i in range(25):  # past the parallel threshold
+        f = project / "src" / f"U{i}.pas"
+        f.write_text(f"unit U{i};\ninterface\nimplementation\nend.\n", encoding="utf-8")
+        files.append(f)
+    extract(files, cache_root=tmp_path / "cache", root=project, parallel=True)
+    assert seen["initializer"] is _worker_init
+    assert seen["initargs"][1].dproj == "Project.dproj"
+    assert seen["initargs"][1].root == project

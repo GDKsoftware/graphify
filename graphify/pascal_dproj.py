@@ -4,6 +4,11 @@ The default namespaces (`DCC_Namespace`) complete a unit name from a `uses`
 clause (`Dialogs` -> `Vcl.Dialogs`). The unit search path
 (`DCC_UnitSearchPath`) is used only to find `{$I}` include files; it never
 changes which units a `uses` clause imports.
+
+`Condition` attributes are ignored: the entries of all PropertyGroups
+(every configuration and platform) are merged. Entries containing a
+`$(...)` macro are dropped, so a project-defined macro directory does not
+contribute.
 """
 from __future__ import annotations
 

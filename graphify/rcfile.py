@@ -27,6 +27,7 @@ typos from silently disabling classification.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
 from dataclasses import dataclass
@@ -283,15 +284,27 @@ def effective_suffix(path: Path | str) -> str:
     return active.get(suffix.lower(), suffix)
 
 
+_PASCAL_SUFFIXES = frozenset({".pas", ".dpr", ".dpk", ".lpr", ".pp"})
+
+
 def cache_salt(path: Path | str) -> str | None:
-    """Extra cache-key material for a remapped file, else ``None``.
+    """Extra cache-key material for a file whose parse depends on settings.
 
     An AST cache entry is keyed by content, and the same bytes parse to a
     different graph under a different extractor — so a ``.inc`` cached as
-    Pascal must not be served once the project declares it PHP.
+    Pascal must not be served once the project declares it PHP. A Pascal
+    file also parses differently when ``{$I}`` files are found through the
+    ``.dproj`` unit search path, so that path is part of its key.
     """
-    active = _active()
-    if not active:
-        return None
-    target = active.get(Path(path).suffix.lower())
-    return f"language={target}" if target else None
+    suffix = Path(path).suffix.lower()
+    target = _active().get(suffix)
+    parts = [f"language={target}"] if target else []
+    if (target or suffix) in _PASCAL_SUFFIXES:
+        from graphify.pascal_dproj import active_dproj
+
+        info = active_dproj()
+        if info is not None and info.search_path:
+            joined = "|".join(str(d) for d in info.search_path)
+            digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()
+            parts.append(f"pascal_dirs={digest}")
+    return ";".join(parts) if parts else None

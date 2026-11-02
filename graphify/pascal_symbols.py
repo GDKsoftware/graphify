@@ -103,9 +103,15 @@ def _choose(directory: Path, version: str | None) -> Path | None:
     return found[max(found, key=_version_key)]
 
 
-def _read(path: Path) -> dict:
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        return json.load(f)
+def _read(path: Path) -> dict | None:
+    """The symbol file at `path`, or None (with a warning) when it is unreadable."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, EOFError, ValueError) as exc:
+        _LOG.warning("cannot read Delphi symbol file %s: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_delphi_symbols(version: str | None = None) -> dict | None:
@@ -132,12 +138,16 @@ def load_delphi_symbols(version: str | None = None) -> dict | None:
         if not target.is_absolute() and settings.root is not None:
             target = settings.root / target
         if target.is_file():
-            return _read(target)
-        if target.is_dir():
+            data = _read(target)
+            if data is not None:
+                return data
+            _LOG.warning("using the bundled Delphi symbol files instead of %s", target)
+        elif target.is_dir():
             chosen = _choose(target, requested)
-            if chosen is not None:
-                return _read(chosen)
-            _LOG.warning("no Delphi symbol file in %s; using the bundled files", target)
+            data = _read(chosen) if chosen is not None else None
+            if data is not None:
+                return data
+            _LOG.warning("no usable Delphi symbol file in %s; using the bundled files", target)
         else:
             _LOG.warning(
                 "pascal.delphi_symbols %s does not exist; using the bundled files", target
