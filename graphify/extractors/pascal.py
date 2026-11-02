@@ -391,6 +391,25 @@ def _resolve_pascal_callee_factory(
     return _resolve
 
 
+def _attach_pascal_unit(path: Path, raw: str, stem: str, nodes: list[dict], result: dict) -> None:
+    """Put the unit symbol block on the module node (file node when the file
+    has no unit header) and the declared visibility on every method node."""
+    from graphify.extractors.pascal_unit import build_pascal_unit
+
+    block = build_pascal_unit(path, raw, stem=stem)
+    result["pascal_unit"] = block
+    by_id = {n["id"]: n for n in nodes}
+    target = by_id.get(block["module_nid"])
+    if target is not None:
+        target["_pascal_unit"] = block
+    for info in block["types"].values():
+        for entries in info["members"].values():
+            for entry in entries:
+                node = by_id.get(entry.get("nid")) if entry["kind"] == "method" else None
+                if node is not None and "visibility" not in node:
+                    node["visibility"] = entry["vis"]
+
+
 def _extract_pascal_regex(path: Path) -> dict:
     """Regex fallback for Pascal/Delphi extraction when tree-sitter-pascal
     is unavailable. Produces the same node/edge schema as the tree-sitter pass.
@@ -470,61 +489,73 @@ def _extract_pascal_regex(path: Path) -> dict:
                 tgt_nid = _pascal_resolve_unit(path, unit_name)
                 _add_edge(module_nid, tgt_nid, "imports", line, context="import")
 
-    # Type declarations (classes / interfaces) in interface section
-    search_text = iface_text if iface_text else stripped
-    search_off = iface_off if iface_text else 0
-    pos = 0
-    while pos < len(search_text):
-        hm = _PAS_TYPE_HEADER_RE.search(search_text, pos)
-        if not hm:
-            break
-        type_name = hm.group("name")
-        bases_raw = hm.group("bases") or ""
-        line = _lineno(stripped, search_off + hm.start())
-        cls_nid = _make_id(stem, type_name)
-        _add_node(cls_nid, type_name, line)
-        _add_edge(module_nid, cls_nid, "contains", line)
+    # Type declarations (classes / interfaces) in the interface section and,
+    # when the file has sections, in the implementation section too.
+    type_sections = (
+        [(iface_text, iface_off), (impl_text, impl_off)] if iface_text else [(stripped, 0)]
+    )
+    impl_type_spans: list[tuple[int, int]] = []
+    for search_text, search_off in type_sections:
+        pos = 0
+        while pos < len(search_text):
+            hm = _PAS_TYPE_HEADER_RE.search(search_text, pos)
+            if not hm:
+                break
+            type_name = hm.group("name")
+            bases_raw = hm.group("bases") or ""
+            line = _lineno(stripped, search_off + hm.start())
+            cls_nid = _make_id(stem, type_name)
+            _add_node(cls_nid, type_name, line)
+            _add_edge(module_nid, cls_nid, "contains", line)
 
-        for base_name in _pascal_split_bases(bases_raw):
-            same_file_nid = _make_id(stem, base_name)
-            if same_file_nid in seen_ids:
-                # Base class already declared earlier in this same file --
-                # reuse its real node instead of the cross-file/stub lookup
-                # below (which assumes one-class-per-file and would create a
-                # duplicate node for a base class that shares this file).
-                base_nid = same_file_nid
-            else:
-                resolved = _pascal_resolve_class(path, base_name)
-                if resolved:
-                    # Cross-file base class found on disk -- its real node
-                    # arrives via THAT file's own extraction. Do not add a
-                    # duplicate stub here: it would carry this file's
-                    # source_file (wrong -- it belongs to the base class's
-                    # own file) and collide with the real node under
-                    # cross-file id disambiguation, producing two different
-                    # salted ids for what should be one class (breaks
-                    # cross-file `inherits`-chain resolution downstream).
-                    base_nid = resolved
+            for base_name in _pascal_split_bases(bases_raw):
+                same_file_nid = _make_id(stem, base_name)
+                if same_file_nid in seen_ids:
+                    # Base class already declared earlier in this same file --
+                    # reuse its real node instead of the cross-file/stub lookup
+                    # below (which assumes one-class-per-file and would create a
+                    # duplicate node for a base class that shares this file).
+                    base_nid = same_file_nid
                 else:
-                    base_nid = _make_id(base_name)
-                    if base_nid not in seen_ids:
-                        _add_node(base_nid, base_name, line)
-            _add_edge(cls_nid, base_nid, "inherits", line)
+                    resolved = _pascal_resolve_class(path, base_name)
+                    if resolved:
+                        # Cross-file base class found on disk -- its real node
+                        # arrives via THAT file's own extraction. Do not add a
+                        # duplicate stub here: it would carry this file's
+                        # source_file (wrong -- it belongs to the base class's
+                        # own file) and collide with the real node under
+                        # cross-file id disambiguation, producing two different
+                        # salted ids for what should be one class (breaks
+                        # cross-file `inherits`-chain resolution downstream).
+                        base_nid = resolved
+                    else:
+                        base_nid = _make_id(base_name)
+                        if base_nid not in seen_ids:
+                            _add_node(base_nid, base_name, line)
+                _add_edge(cls_nid, base_nid, "inherits", line)
 
-        # Find class body (up to next end;)
-        end_m = _PAS_END_SEMI_RE.search(search_text, hm.end())
-        body_text = search_text[hm.end():end_m.start()] if end_m else ""
-        body_off = search_off + hm.end()
+            # Find class body (up to next end;)
+            end_m = _PAS_END_SEMI_RE.search(search_text, hm.end())
+            body_text = search_text[hm.end():end_m.start()] if end_m else ""
+            body_off = search_off + hm.end()
 
-        # Forward method declarations inside the class body
-        for mm in _PAS_METHOD_DECL_RE.finditer(body_text):
-            mname = mm.group("name")
-            mline = _lineno(stripped, body_off + mm.start())
-            method_nid = _make_id(cls_nid, mname)
-            _add_node(method_nid, f"{mname}()", mline)
-            _add_edge(cls_nid, method_nid, "method", mline)
+            # Forward method declarations inside the class body
+            for mm in _PAS_METHOD_DECL_RE.finditer(body_text):
+                mname = mm.group("name")
+                mline = _lineno(stripped, body_off + mm.start())
+                method_nid = _make_id(cls_nid, mname)
+                _add_node(method_nid, f"{mname}()", mline)
+                _add_edge(cls_nid, method_nid, "method", mline)
 
-        pos = end_m.end() if end_m else len(search_text)
+            if iface_text and search_text is impl_text:
+                impl_type_spans.append((hm.start(), end_m.end() if end_m else len(search_text)))
+            pos = end_m.end() if end_m else len(search_text)
+
+    # The member declarations of a class declared in the implementation section
+    # are not routine headers: blank them (keeping offsets and newlines).
+    for span_start, span_end in impl_type_spans:
+        blanked = "".join(c if c == "\n" else " " for c in impl_text[span_start:span_end])
+        impl_text = impl_text[:span_start] + blanked + impl_text[span_end:]
 
     # Implementation headers (procedure/function/constructor/destructor),
     # nested routines included.
@@ -631,10 +662,12 @@ def _extract_pascal_regex(path: Path) -> dict:
             seen_call_pairs.add(pair)
             _add_edge(caller_nid, target_nid, "calls", call_line, context="call")
 
-    return {
+    result = {
         "nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0,
         "raw_calls": raw_calls,
     }
+    _attach_pascal_unit(path, raw, stem, nodes, result)
+    return result
 
 def extract_pascal(path: Path) -> dict:
     """Extract units, classes, procedures, uses-imports, and calls from Pascal/Delphi files.
@@ -1006,7 +1039,10 @@ def extract_pascal(path: Path) -> dict:
     for proc_nid, body_node, _container, _name_lower in proc_bodies:
         walk_calls(body_node, proc_nid)
 
-    return {
+    result = {
         "nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0,
         "raw_calls": raw_calls,
     }
+    _attach_pascal_unit(path, _read_source_text(path, warn=False), stem, nodes, result)
+    return result
+

@@ -212,7 +212,15 @@ def _uses(section_text: str) -> list[str]:
     names: list[str] = []
     for um in _pas._PAS_USES_RE.finditer(section_text):
         names.extend(_pas._pascal_split_uses(um.group(1)))
-    return names
+    # `{$IFDEF}` branches are not evaluated, so a unit can be listed twice.
+    return _dedupe(names)
+
+
+def _dedupe(names: list[str]) -> list[str]:
+    seen: dict[str, str] = {}
+    for name in names:
+        seen.setdefault(name.lower(), name)
+    return list(seen.values())
 
 
 def _collect_include(

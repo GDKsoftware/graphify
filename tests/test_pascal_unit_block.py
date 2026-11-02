@@ -219,3 +219,88 @@ end.
     assert b["routines"]["Hidden"][0]["interface"] is False
     assert b["globals"] == {"G1": "Integer", "G2": "Integer", "G3": "array[0..3] of Byte",
                             "Later": "string"}
+
+
+# --- the block on the nodes of both extractors -------------------------------
+
+from graphify.extractors.pascal import _extract_pascal_regex, extract_pascal  # noqa: E402
+
+EXTRACTORS = [pytest.param(extract_pascal, id="tree-sitter"), pytest.param(_extract_pascal_regex, id="regex")]
+
+
+@pytest.mark.parametrize("extractor", EXTRACTORS)
+def test_module_node_carries_unit_block(extractor):
+    result = extractor(DECLS)
+    module = next(n for n in result["nodes"] if n["id"] == make_id(STEM, "Decls"))
+    assert module["_pascal_unit"]["unit"] == "Decls"
+    assert result["pascal_unit"]["unit"] == "Decls"
+
+
+@pytest.mark.parametrize("extractor", EXTRACTORS)
+def test_marker_sits_on_file_node_without_unit_header(extractor, tmp_path):
+    path = tmp_path / "Plain.inc"
+    path.write_text("procedure Foo;\nbegin\nend;\n", encoding="utf-8")
+    result = extractor(path)
+    file_node = next(n for n in result["nodes"] if n["label"] == "Plain.inc")
+    assert "_pascal_unit" in file_node
+
+
+@pytest.mark.parametrize("extractor", EXTRACTORS)
+def test_method_nodes_carry_visibility(extractor):
+    result = extractor(DECLS)
+    geheim = next(n for n in result["nodes"] if n["label"] == "Geheim()")
+    assert geheim["visibility"] == "private"
+    verander = next(n for n in result["nodes"] if n["label"] == "Verander()")
+    assert verander["visibility"] == "public"
+
+
+def test_pascal_unit_marker_survives_export(tmp_path):
+    from graphify.build import build
+    from graphify.cluster import cluster
+    from graphify.export import to_graphml, to_json
+    from graphify.extract import extract
+
+    graph = build([extract([DECLS])])
+    communities = cluster(graph)
+    to_json(graph, communities, str(tmp_path / "graph.json"))
+    to_graphml(graph, communities, str(tmp_path / "graph.graphml"))
+    assert "_pascal_unit" not in (tmp_path / "graph.graphml").read_text(encoding="utf-8")
+
+
+def test_context_marker_allow_lists_include_pascal_unit():
+    root = Path(__file__).parent.parent / "graphify"
+    for name in ("cli.py", "watch.py"):
+        assert '"_pascal_unit"' in (root / name).read_text(encoding="utf-8"), name
+
+
+NESTED = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Nested.pas"
+
+
+@pytest.mark.parametrize("extractor", EXTRACTORS)
+def test_class_declared_in_implementation_gets_node_and_method_ids(extractor):
+    stem = file_stem(NESTED)
+    ids = {n["id"] for n in extractor(NESTED)["nodes"]}
+    assert make_id(stem, "TBar") in ids
+    assert make_id(stem, "TBar.M") in ids
+    assert make_id(stem, "M") not in ids and not any(i.endswith("_nested_m") for i in ids)
+
+
+def test_uses_are_deduplicated_case_insensitively(tmp_path):
+    source = (
+        "unit U;\ninterface\nuses\n  System.Collections,\n  WinUtils,\n  winutils;\n"
+        "implementation\nuses\n  Foo, FOO, Bar;\nend.\n"
+    )
+    block = _build(tmp_path, source)
+    assert block["interface_uses"] == ["System.Collections", "WinUtils"]
+    assert block["implementation_uses"] == ["Foo", "Bar"]
+
+
+def test_block_node_ids_follow_the_id_remap(tmp_path):
+    from graphify.extract import extract
+
+    (tmp_path / "A.pas").write_text("unit A;\ninterface\nimplementation\nend.\n", encoding="utf-8")
+    (tmp_path / "B.pas").write_text("unit B;\ninterface\nimplementation\nend.\n", encoding="utf-8")
+    result = extract([tmp_path / "A.pas", tmp_path / "B.pas"])
+    module_ids = {n["id"] for n in result["nodes"] if n["label"] in ("A", "B")}
+    block_ids = {n["_pascal_unit"]["module_nid"] for n in result["nodes"] if "_pascal_unit" in n}
+    assert block_ids == module_ids
