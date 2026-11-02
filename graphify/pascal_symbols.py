@@ -106,6 +106,8 @@ class SymbolTable:
         self._globals: dict[str, dict[str, str]] = {}
         self._proc_types: dict[str, set[str]] = {}
         self._files: dict[str, str] = {}
+        # Unit names declared by more than one scanned file.
+        self._ambiguous: set[str] = set()
 
     # ------------------------------------------------------------ building
 
@@ -125,15 +127,30 @@ class SymbolTable:
             source = block.get("source_file") or ""
             if source.lower().endswith(".inc"):
                 include_blocks[Path(source).name.casefold()] = block
-            else:
+            elif block.get("unit"):
+                # A block without a unit (or program) name has nothing to register.
                 unit_blocks.append(block)
+        counts: dict[str, int] = {}
         for block in unit_blocks:
-            table._add_unit(block.get("unit") or "", block, scanned=True)
+            key = block["unit"].casefold()
+            counts[key] = counts.get(key, 0) + 1
+        table._ambiguous = {key for key, n in counts.items() if n > 1}
+        keys: list[str] = []
+        for i, block in enumerate(unit_blocks):
+            name = block["unit"]
+            if name.casefold() in table._ambiguous:
+                # Two scanned files declare this unit. Each keeps its own block
+                # under a private key, so lookups in the caller's own unit use
+                # the caller's file; by name the unit is ambiguous (no hit).
+                name = f"{name}#{i}"
+            keys.append(name.casefold())
+            table._add_unit(name, block, scanned=True)
         units = (delphi or {}).get("units") or {}
         for name, block in units.items():
-            if name.casefold() not in table._units:
+            key = name.casefold()
+            if key not in table._units and key not in table._ambiguous:
                 table._add_unit(name, block, scanned=False)
-        table._apply_includes(unit_blocks, include_blocks)
+        table._apply_includes(list(zip(keys, unit_blocks)), include_blocks)
         return table
 
     def _add_unit(self, name: str, block: dict, *, scanned: bool) -> None:
@@ -203,10 +220,11 @@ class SymbolTable:
             unit=unit,
         )
 
-    def _apply_includes(self, unit_blocks: list[dict], include_blocks: dict[str, dict]) -> None:
+    def _apply_includes(
+        self, unit_blocks: list[tuple[str, dict]], include_blocks: dict[str, dict],
+    ) -> None:
         """A unit takes the routines of its include blocks instead of its own copy."""
-        for block in unit_blocks:
-            key = (block.get("unit") or "").casefold()
+        for key, block in unit_blocks:
             for include in block.get("includes") or ():
                 inc = include_blocks.get(Path(include).name.casefold())
                 if inc is None and not Path(include).suffix:
@@ -236,7 +254,12 @@ class SymbolTable:
     # ------------------------------------------------------------- queries
 
     def resolve_unit_name(self, name: str) -> str | None:
-        """Exact (case-insensitive) first, then `<namespace>.<name>` in order."""
+        """Exact (case-insensitive) first, then `<namespace>.<name>` in order.
+
+        A unit name that more than one scanned file declares resolves to None.
+        """
+        if name.casefold() in self._ambiguous:
+            return None
         found = self._units.get(name.casefold())
         if found is not None:
             return found.name
@@ -332,6 +355,17 @@ class SymbolTable:
 
     def is_type(self, unit: str, name: str) -> bool:
         return self.lookup_type(unit, name) is not None
+
+    def declares_type(self, unit: str, name: str) -> bool:
+        """Whether `unit` itself declares a type (or procedure type) `name`."""
+        resolved = self.resolve_unit_name(unit)
+        if resolved is None:
+            return False
+        key = resolved.casefold()
+        return (
+            name.casefold() in self._unit_types.get(key, {})
+            or name.casefold() in self._proc_types.get(key, ())
+        )
 
     def caller_class(self, unit: str, enclosing: Sequence[str]) -> str | None:
         """Qualified class of the outermost enclosing routine, if it is a method."""

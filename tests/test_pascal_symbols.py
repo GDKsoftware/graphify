@@ -179,3 +179,34 @@ def test_load_delphi_symbols_picks_highest_version(tmp_path, monkeypatch):
     assert load_delphi_symbols()["delphi_version"] == "13.10"
     assert load_delphi_symbols("12.3")["delphi_version"] == "12.3"
     assert load_delphi_symbols("11.0") is None
+
+
+def _unit_block(name: str, source: str, routine: str, nid: str) -> dict:
+    return {
+        "unit": name, "module_nid": f"m-{nid}", "interface_uses": [],
+        "implementation_uses": [], "includes": [], "types": {}, "nested": {},
+        "globals": {}, "proc_types": [], "source_file": source,
+        "routines": {routine: [{"interface": True, "params": 0, "min_params": 0, "nid": nid}]},
+    }
+
+
+def test_block_without_unit_name_is_not_registered():
+    t = SymbolTable.from_sources([_unit_block("", "C:/p/x.pas", "Foo", "foo")], None)
+    assert t.unit("") is None
+    assert t.unit_of_file("C:/p/x.pas") is None
+
+
+def test_duplicate_unit_name_keeps_each_file_and_is_ambiguous_by_name():
+    first = _unit_block("Dup", "C:/a/Dup.pas", "Foo", "a_foo")
+    second = _unit_block("Dup", "C:/b/Dup.pas", "Foo", "b_foo")
+    t = SymbolTable.from_sources([first, second], _delphi())
+    # Own-unit lookups go through the caller's file and see that file's block.
+    own_a = t.unit_of_file("C:/a/Dup.pas")
+    own_b = t.unit_of_file(r"c:\b\dup.pas")
+    assert own_a and own_b and own_a != own_b
+    assert [r.nid for r in t.routines(own_a, "foo", interface_only=False)] == ["a_foo"]
+    assert [r.nid for r in t.routines(own_b, "FOO", interface_only=False)] == ["b_foo"]
+    # From another unit the name is ambiguous: no unit, no routines.
+    assert t.resolve_unit_name("Dup") is None
+    assert t.unit("dup") is None
+    assert t.routines("Dup", "Foo", interface_only=True) == []

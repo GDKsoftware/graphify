@@ -8,7 +8,7 @@ from graphify.extractors.pascal_calls import count_args, make_raw_call, split_ca
 from graphify.extractors.resolution import _pascal_resolve_class, _pascal_resolve_unit
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 # Delphi 12+ multiline string: an odd run of 3+ quotes ending its line, closed
@@ -315,83 +315,6 @@ def _pascal_call_args(body_text: str, open_pos: int) -> tuple[str, bool]:
     return body_text[open_pos + 1:], False
 
 
-def _resolve_pascal_callee_factory(
-    records: list[tuple],
-    edges: list[dict],
-    module_nid: str,
-) -> Callable[[str, str], str | None]:
-    """Build a scoped call resolver for a single Pascal/Delphi file.
-
-    ``records`` is the list of raw per-procedure tuples produced by either
-    Pascal extractor; only the trailing ``(..., container, name_lower)``
-    fields and the leading ``proc_nid`` are used, so both extractors' tuple
-    shapes work unmodified (regex: proc_nid, line, body_text, container,
-    name_lower; tree-sitter: proc_nid, body_node, container, name_lower).
-
-    Resolution order for a call to ``name_lower`` from ``caller_nid``:
-      1. A method declared on the caller's own class.
-      2. A method declared on an ancestor class (BFS up ``inherits`` edges,
-         which are already resolved by this point).
-      3. A file-level free function (declared directly under the module).
-      4. A global by-name match, but only when unambiguous (exactly one
-         procedure with that name anywhere in the file).
-
-    Returns None (no edge emitted) when the name is ambiguous at every
-    level -- guessing at a same-named method on an unrelated class is worse
-    than omitting the edge. Same-named methods on unrelated classes are a
-    common Pascal/Delphi pattern (property accessors, generated wrapper
-    classes such as TLB import units): without this scoping, a flat
-    file-wide by-name lookup silently collapses onto whichever declaration
-    happens to be inserted last, producing wrong cross-class edges. Mirrors
-    the "god-node guard" already used by ``resolve_ruby_member_calls`` for
-    the analogous Ruby ambiguous-method-name problem.
-    """
-    class_bases: dict[str, list[str]] = {}
-    for e in edges:
-        if e.get("relation") == "inherits":
-            class_bases.setdefault(e["source"], []).append(e["target"])
-
-    class_procs: dict[str, dict[str, list[str]]] = {}
-    module_procs: dict[str, list[str]] = {}
-    global_procs: dict[str, list[str]] = {}
-    proc_owner: dict[str, str] = {}
-    for rec in records:
-        proc_nid, container, name_lower = rec[0], rec[-2], rec[-1]
-        proc_owner[proc_nid] = container
-        global_procs.setdefault(name_lower, []).append(proc_nid)
-        if container == module_nid:
-            module_procs.setdefault(name_lower, []).append(proc_nid)
-        else:
-            class_procs.setdefault(container, {}).setdefault(name_lower, []).append(proc_nid)
-
-    def _resolve(caller_nid: str, name_lower: str) -> str | None:
-        owner = proc_owner.get(caller_nid)
-        if owner is not None:
-            candidates = class_procs.get(owner, {}).get(name_lower)
-            if candidates:
-                return candidates[0] if len(candidates) == 1 else None
-            seen_bases: set[str] = set()
-            queue = list(class_bases.get(owner, []))
-            while queue:
-                base = queue.pop(0)
-                if base in seen_bases:
-                    continue
-                seen_bases.add(base)
-                candidates = class_procs.get(base, {}).get(name_lower)
-                if candidates:
-                    return candidates[0] if len(candidates) == 1 else None
-                queue.extend(class_bases.get(base, []))
-        candidates = module_procs.get(name_lower)
-        if candidates:
-            return candidates[0] if len(candidates) == 1 else None
-        candidates = global_procs.get(name_lower)
-        if candidates and len(candidates) == 1:
-            return candidates[0]
-        return None
-
-    return _resolve
-
-
 def _attach_pascal_unit(path: Path, raw: str, stem: str, nodes: list[dict], result: dict) -> None:
     """Put the unit symbol block on the module node (file node when the file
     has no unit header) and the declared visibility on every method node."""
@@ -427,7 +350,6 @@ def _extract_pascal_regex(path: Path) -> dict:
     nodes: list[dict] = []
     edges: list[dict] = []
     seen_ids: set[str] = set()
-    seen_call_pairs: set[tuple[str, str]] = set()
     seen_edges: set[tuple[str, str, str]] = set()
 
     def _add_node(nid: str, label: str, line: int) -> None:
@@ -606,14 +528,8 @@ def _extract_pascal_regex(path: Path) -> dict:
     for routine in _pascal_scan_routines(impl_text):
         _add_routine(routine, None, set())
 
-    # Intra-file call edges, scoped by the caller's own class, then its
-    # ancestor chain (via `inherits` edges already emitted above), then
-    # file-level free functions; fall back to a global by-name match only
-    # when it is unambiguous (single owner across the file). Prevents
-    # same-named methods on unrelated classes (property accessors, generated
-    # wrapper classes such as TLB import units, etc. -- a common Pascal/Delphi
-    # pattern) from collapsing into an arbitrary cross-class edge.
-    callee_nid = _resolve_pascal_callee_factory(impl_records, edges, module_nid)
+    # Every call is reported as a raw call; graphify.pascal_resolution binds
+    # them after all files are extracted, with the Delphi scope rules.
     raw_calls: list[dict] = []
     for caller_nid, body_line, body_text, _container, _name_lower in impl_records:
         chain, shadow, method_name = impl_scope[caller_nid]
@@ -629,41 +545,19 @@ def _extract_pascal_regex(path: Path) -> dict:
                 qualifier, callee_name = split_callee(cm.group("callee"))
                 if cm.group("inh") and qualifier is None:
                     qualifier = "inherited"
-            if qualifier == "inherited":
-                # Never the caller's own class: skip the per-file resolver, the
-                # cross-file pass walks the ancestors.
-                raw_calls.append(make_raw_call(
-                    source_file=str_path, line=call_line, caller_nid=caller_nid,
-                    callee=callee_name, qualifier=qualifier, arg_count=arg_count,
-                    enclosing_routines=chain,
-                ))
-                continue
-            name_lower = callee_name.lower()
-            if name_lower in _PAS_KEYWORDS:
-                continue
-            # A parameter or local of the caller (or an enclosing routine) is
-            # not a routine call.
-            if qualifier is None and name_lower in shadow:
-                continue
-            target_nid = callee_nid(caller_nid, name_lower)
-            if target_nid == caller_nid:
-                continue
-            if not target_nid:
-                # Not resolvable within this file (e.g. inherited from a base
-                # class declared in another file) -- report for the
-                # cross-file resolver (graphify.pascal_resolution) instead of
-                # guessing or dropping it silently.
-                raw_calls.append(make_raw_call(
-                    source_file=str_path, line=call_line, caller_nid=caller_nid,
-                    callee=callee_name, qualifier=qualifier, arg_count=arg_count,
-                    enclosing_routines=chain,
-                ))
-                continue
-            pair = (caller_nid, target_nid)
-            if pair in seen_call_pairs:
-                continue
-            seen_call_pairs.add(pair)
-            _add_edge(caller_nid, target_nid, "calls", call_line, context="call")
+            if qualifier != "inherited":
+                name_lower = callee_name.lower()
+                if name_lower in _PAS_KEYWORDS:
+                    continue
+                # A parameter or local of the caller (or an enclosing routine)
+                # is not a routine call.
+                if qualifier is None and name_lower in shadow:
+                    continue
+            raw_calls.append(make_raw_call(
+                source_file=str_path, line=call_line, caller_nid=caller_nid,
+                callee=callee_name, qualifier=qualifier, arg_count=arg_count,
+                enclosing_routines=chain,
+            ))
 
     result = {
         "nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0,
@@ -687,7 +581,9 @@ def extract_pascal(path: Path) -> dict:
     - class --inherits--> base class
     - class/module --contains--> method forward declaration
     - class/module --contains--> procedure/function implementation
-    - procedure --calls--> other procedure (within the same file)
+
+    Reports every call in a routine body as a raw call; graphify.pascal_resolution
+    binds them to `calls` edges after all files are extracted.
 
     Uses tree-sitter-pascal when available; falls back to a regex-based extractor
     (_extract_pascal_regex) when it isn't installed or fails to parse, so Pascal
@@ -950,50 +846,22 @@ def extract_pascal(path: Path) -> dict:
 
     walk(root, file_nid)
 
-    # Second pass: resolve calls inside procedure/function bodies, scoped by
-    # the caller's own class, then its ancestor chain, then file-level free
-    # functions, falling back to an unambiguous global match (see
-    # _resolve_pascal_callee_factory).
-    resolve_callee = _resolve_pascal_callee_factory(proc_bodies, edges, module_nid)
-    seen_call_pairs: set[tuple[str, str]] = set()
+    # Second pass: report every call inside procedure/function bodies as a raw
+    # call; graphify.pascal_resolution binds them with the Delphi scope rules.
     raw_calls: list[dict] = []
 
-    def _report(
-        caller_nid: str, line: int, callee: str, qualifier: str | None, arg_count: int | None,
+    def _emit_or_report(
+        caller_nid: str, callee: str, qualifier: str | None, line: int, arg_count: int | None,
     ) -> None:
+        # A parameter or local of the caller (or an enclosing routine) is not
+        # a routine call.
+        if qualifier is None and callee.lower() in proc_scope[caller_nid][1]:
+            return
         raw_calls.append(make_raw_call(
             source_file=str_path, line=line, caller_nid=caller_nid, callee=callee,
             qualifier=qualifier, arg_count=arg_count,
             enclosing_routines=proc_scope[caller_nid][0],
         ))
-
-    def _emit_or_report(
-        caller_nid: str, callee: str, qualifier: str | None, line: int, arg_count: int | None,
-    ) -> None:
-        if qualifier == "inherited":
-            # Never the caller's own class: skip the per-file resolver, the
-            # cross-file pass walks the ancestors.
-            _report(caller_nid, line, callee, qualifier, arg_count)
-            return
-        name_lower = callee.lower()
-        # A parameter or local of the caller (or an enclosing routine) is not
-        # a routine call.
-        if qualifier is None and name_lower in proc_scope[caller_nid][1]:
-            return
-        target = resolve_callee(caller_nid, name_lower)
-        if target == caller_nid:
-            return
-        if not target:
-            # Not resolvable within this file (e.g. inherited from a base
-            # class declared in another file) -- report for the cross-file
-            # resolver (graphify.pascal_resolution) instead of guessing or
-            # dropping it silently.
-            _report(caller_nid, line, callee, qualifier, arg_count)
-            return
-        pair = (caller_nid, target)
-        if pair not in seen_call_pairs:
-            seen_call_pairs.add(pair)
-            add_edge(caller_nid, target, "calls", line, context="call")
 
     def _call_site(
         caller_nid: str, callee_text: str, line: int, arg_count: int | None,

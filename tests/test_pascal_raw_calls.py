@@ -73,7 +73,13 @@ def test_make_raw_call_schema():
         source_file="x.pas", line=1, caller_nid="n", callee="Foo", qualifier="Unit1",
         arg_count=0, enclosing_routines=[],
     )
-    assert unit_call["is_member_call"] is True
+    # Whether `Unit1` is a unit, variable or type is for the resolver to decide.
+    assert unit_call["is_member_call"] is False
+    expr_call = make_raw_call(
+        source_file="x.pas", line=1, caller_nid="n", callee="Foo", qualifier="a[i]",
+        arg_count=0, enclosing_routines=[],
+    )
+    assert expr_call["is_member_call"] is True
 
 
 @pytest.mark.parametrize("extractor", _extractors())

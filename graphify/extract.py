@@ -28,8 +28,7 @@ from .resolver_registry import (
 from .ruby_resolution import resolve_ruby_member_calls
 from .csharp_dispatch import resolve_csharp_interface_dispatch
 from .swift_dispatch import resolve_swift_protocol_dispatch
-from .pascal_resolution import SUPERSEDED_FLAG as PASCAL_SUPERSEDED_FLAG
-from .pascal_resolution import resolve_pascal_inherited_calls
+from .pascal_resolution import resolve_pascal_calls
 from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
@@ -7856,17 +7855,16 @@ register_language_resolver(
         _resolve_elixir_qualified_calls,
     )
 )
-# Pascal/Delphi cross-file inherited-method-call resolution: a call from a
-# manual descendant class to a method it inherits from an ancestor declared
-# in a DIFFERENT file (the common generated-base/manual-descendant split,
-# e.g. Sistec's Th0Xxx/Th5Xxx) falls outside the per-file extractor's own
-# scope. Lives in graphify.pascal_resolution; registered here as a consumer
-# of the framework, same as the Ruby resolver above.
+# Pascal/Delphi call resolution by the Delphi scope rules (nested routines,
+# own class, ancestors, own unit, uses lists). The extractors bind no calls
+# themselves and the shared by-name pass skips Pascal raw calls, so this is the
+# only pass that turns them into `calls` edges. Lives in
+# graphify.pascal_resolution; registered here as a consumer of the framework.
 register_language_resolver(
     LanguageResolver(
-        "pascal_inherited_calls",
-        frozenset({".pas", ".pp", ".dpr", ".dpk", ".inc"}),
-        resolve_pascal_inherited_calls,
+        "pascal_scope",
+        frozenset({".pas", ".pp", ".dpr", ".dpk", ".lpr", ".inc"}),
+        resolve_pascal_calls,
     )
 )
 # Kotlin fully-qualified call resolution (#2550): `com.pkg.Fn()` /
@@ -10865,6 +10863,10 @@ def extract(
     for rc in all_raw_calls:
         if rc.get("_ambiguous_python_import"):
             continue
+        # Pascal calls are bound only by the Delphi scope resolver
+        # (graphify.pascal_resolution), never by name.
+        if rc.get("language") == "pascal":
+            continue
         callee = rc.get("callee", "")
         if not callee:
             continue
@@ -11249,6 +11251,10 @@ def extract(
     # unchanged file is ever emitted, and the ambiguity guards count the same
     # candidates a full build would (the context is the whole unchanged corpus).
     _stamp_python_fixture_paths(per_file, root)
+    # The Pascal resolver reads node ids from the `_pascal_unit` blocks: bring
+    # them to the current ids first, and follow later rewrites from here on.
+    follow_node_ids(all_nodes, _pascal_id_snapshot, per_file)
+    _pascal_id_snapshot = snapshot_node_ids(all_nodes)
     if resolution_context_nodes or resolution_context_edges:
         _rl_nodes = list(resolution_nodes)
         _rl_edges = all_edges + list(resolution_context_edges or [])
@@ -11258,10 +11264,6 @@ def extract(
         all_edges.extend(_rl_edges[_e0:])
     else:
         run_language_resolvers(paths, per_file, all_nodes, all_edges)
-
-    # A by-name `calls` guess the Pascal resolver proved wrong (see
-    # graphify.pascal_resolution.SUPERSEDED_FLAG) is dropped now that it is final.
-    all_edges[:] = [e for e in all_edges if not e.pop(PASCAL_SUPERSEDED_FLAG, False)]
 
     # A Rust `use` group keeps one edge per binding; its v8 edge only served the calls above.
     all_edges[:] = [e for e in all_edges if not e.pop("_rust_use_group", False)]

@@ -81,8 +81,9 @@ def make_raw_call(
         "caller_nid": caller_nid,
         "callee": callee,
         "qualifier": qualifier,
-        "is_member_call": qualifier is not None
-        and qualifier.lower() not in ("self", "inherited"),
+        # Only an expression receiver is known to be a member call here; whether
+        # a plain qualifier is a unit, variable or type is up to the resolver.
+        "is_member_call": is_expression_receiver(qualifier),
         "arg_count": arg_count,
         "enclosing_routines": enclosing_routines,
     }
