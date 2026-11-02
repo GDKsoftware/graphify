@@ -376,11 +376,13 @@ def vcl(run, monkeypatch):
     return run("VclGebruik.pas", "ZonderDialogs.pas")
 
 
-def _imports_target(graph: dict, file: str, entry: str) -> str:
-    """Target of the `imports` edge of the module in `file` for the uses entry."""
+def _imports_target(graph: dict, file: str, unit: str) -> str:
+    """Target of the `imports` edge of the module in `file` to the symbol-file
+    unit `unit` (its full name: the stub is named after it, however the uses
+    entry spells it)."""
     from graphify.extract import _make_id
 
-    stub = _make_id(entry)
+    stub = _make_id(unit)
     module = next(
         n for n in graph["nodes"]
         if _file(n) == file and n.get("label", "").lower() == Path(file).stem.lower()
@@ -389,7 +391,7 @@ def _imports_target(graph: dict, file: str, entry: str) -> str:
         e for e in graph["edges"]
         if e["relation"] == "imports" and e["source"] == module["id"] and e["target"] == stub
     ]
-    assert hits, (file, entry)
+    assert hits, (file, unit)
     return hits[0]["target"]
 
 
@@ -398,7 +400,7 @@ def _edge_to(graph: dict, file: str, label: str, target: str) -> dict | None:
 
 
 def test_vcl_routine_resolves_to_unit_stub(vcl):
-    target = _imports_target(vcl, "VclGebruik.pas", "Dialogs")
+    target = _imports_target(vcl, "VclGebruik.pas", "Vcl.Dialogs")
     edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", target)
     assert edge is not None
     assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.1/6")
@@ -407,13 +409,13 @@ def test_vcl_routine_resolves_to_unit_stub(vcl):
 
 
 def test_ancestor_from_symbol_file(vcl):
-    target = _imports_target(vcl, "VclGebruik.pas", "Forms")
+    target = _imports_target(vcl, "VclGebruik.pas", "Vcl.Forms")
     edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", target)
     assert edge is not None and edge["rule"] == "5.1/3"
 
 
 def test_global_from_symbol_file(vcl):
-    forms = _imports_target(vcl, "VclGebruik.pas", "Forms")
+    forms = _imports_target(vcl, "VclGebruik.pas", "Vcl.Forms")
     edge = _edge_to(vcl, "VclGebruik.pas", "Wacht()", forms)
     assert edge is not None
     assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.2/4")

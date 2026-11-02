@@ -396,22 +396,32 @@ class SymbolTable:
     def external_target(self, caller_unit: str, unit: str) -> str:
         """Node id of the stub of the symbol-file unit `unit`, seen from `caller_unit`.
 
-        It is the target of the caller's `imports` edge for the uses entry that
-        resolves to `unit`, spelled as written. `System` and `SysInit` are
-        implicit and need no uses entry. Returns "" when the caller does not
-        reach the unit, so no edge is made.
+        One stub per unit, named after the full unit name (`Vcl.Dialogs`),
+        however the caller's uses entry spells it; the `imports` edges are
+        brought to the same id (`canonical_external`). `System` and `SysInit`
+        are implicit and need no uses entry. Returns "" when the caller does
+        not reach the unit, so no edge is made.
         """
-        from .extractors.resolution import _pascal_resolve_unit
         from .ids import make_id
 
         own = self.unit(caller_unit)
         if own is not None and own.source_file:
             for used in (*own.implementation_uses, *own.interface_uses):
                 if (self.resolve_unit_name(used) or "").casefold() == unit.casefold():
-                    return _pascal_resolve_unit(Path(own.source_file), used)
+                    return make_id(self._units[unit.casefold()].name)
         if unit.casefold() in ("system", "sysinit"):
             return make_id(unit)
         return ""
+
+    def canonical_external(self, used: str) -> str | None:
+        """Full name of the symbol-file unit a uses entry names, or None when
+        the entry names a scanned unit or no known unit at all."""
+        resolved = self.resolve_unit_name(used)
+        found = self._units.get(resolved.casefold()) if resolved else None
+        return found.name if found is not None and not found.scanned else None
+
+    def scanned_units(self) -> list[UnitSymbols]:
+        return [u for u in self._units.values() if u.scanned]
 
     def unit_of_file(self, source_file: str) -> str | None:
         """Unit of a scanned file. An include file belongs to the unit that

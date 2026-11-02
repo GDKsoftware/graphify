@@ -11271,6 +11271,11 @@ def extract(
     else:
         run_language_resolvers(paths, per_file, all_nodes, all_edges)
 
+    # A Pascal `imports` edge that became a duplicate, and a short unit stub
+    # left unused, when the scope resolver pointed both spellings of a unit
+    # at its one stub.
+    all_edges[:] = [e for e in all_edges if not e.pop("_pascal_duplicate", False)]
+    all_nodes[:] = [n for n in all_nodes if not n.pop("_pascal_duplicate", False)]
     # A Rust `use` group keeps one edge per binding; its v8 edge only served the calls above.
     all_edges[:] = [e for e in all_edges if not e.pop("_rust_use_group", False)]
     for e in all_edges:

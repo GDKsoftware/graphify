@@ -19,12 +19,14 @@ level gets no edge: Pascal calls are never bound by name alone. A hit without a
 graph node (a field, a declaration without a body in the scan) also ends the
 search without an edge, so a missing edge is preferred to a wrong one. A hit in
 the Delphi symbol file (or in `System`/`SysInit`) has no node of its own: the
-edge goes to the stub node of its unit, the target of the caller's `imports`
-edge (spec 5.5).
+edge goes to the stub node of its unit: one node per unit, named after its full
+name (`System.SysUtils`), which the `imports` edges of every spelling of the
+uses entry point at too (spec 5.5).
 """
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -486,7 +488,9 @@ def resolve_pascal_calls(
         for rc in result.get("raw_calls", []) or []
         if isinstance(rc, dict) and rc.get("language") == "pascal"
     ]
-    if not raw_calls:
+    if not raw_calls and not any(
+        isinstance(result, dict) and result.get("pascal_unit") for result in per_file
+    ):
         return
     table = build_symbol_table(all_nodes)
     resolver = DelphiResolver(table)
@@ -532,7 +536,63 @@ def resolve_pascal_calls(
         }
         existing[pair] = edge
         all_edges.append(edge)
+    _canonical_imports(table, all_nodes, all_edges, resolver.externals)
     _add_external_nodes(resolver.externals, all_nodes)
+
+
+def _canonical_imports(
+    table: SymbolTable, all_nodes: list[dict], all_edges: list[dict], externals: dict[str, str],
+) -> None:
+    """Point every `imports` edge to a symbol-file unit at that unit's one stub.
+
+    The extractors aim an `imports` edge at the uses entry as written, so
+    `uses SysUtils` and `uses System.SysUtils` made two stubs for one unit,
+    and the calls (which go to `make_id(<full unit name>)`) to a third id.
+    An edge whose target is a node of a scanned file is never touched, and a
+    unit in neither the scan nor the symbol file keeps its stub. A second
+    edge to the same stub from the same module, and a short stub nothing
+    points at any more, are marked `_pascal_duplicate`; extract() drops them
+    after the resolvers ran.
+    """
+    from .extractors.resolution import _pascal_resolve_unit
+    from .ids import make_id
+
+    redirect: dict[tuple[str, str], tuple[str, str]] = {}
+    for unit in table.scanned_units():
+        if not unit.module_nid or not unit.source_file:
+            continue
+        for used in (*unit.interface_uses, *unit.implementation_uses):
+            name = table.canonical_external(used)
+            if name is None:
+                continue
+            written = _pascal_resolve_unit(Path(unit.source_file), used)
+            redirect[(unit.module_nid, written)] = (make_id(name), name)
+    if not redirect:
+        return
+    by_id = {n.get("id"): n for n in all_nodes}
+    short: set[str] = set()
+    seen: set[tuple] = set()
+    for e in all_edges:
+        if e.get("relation") != "imports":
+            continue
+        source, target = e.get("source"), e.get("target")
+        hit = redirect.get((source, target))
+        if hit is not None and not (by_id.get(target) or {}).get("source_file"):
+            if target != hit[0]:
+                short.add(str(target))
+            e["target"] = hit[0]
+            externals[hit[0]] = hit[1]
+        key = (source, e.get("target"))
+        if key in seen:
+            e["_pascal_duplicate"] = True
+        seen.add(key)
+    # A short stub made earlier goes once nothing points at it. It is only
+    # marked: on an incremental build these lists are scratch copies whose
+    # length the caller relies on, so extract() drops it afterwards.
+    still = {e.get("target") for e in all_edges if not e.get("_pascal_duplicate")}
+    for n in all_nodes:
+        if n.get("id") in short and not n.get("source_file") and n.get("id") not in still:
+            n["_pascal_duplicate"] = True
 
 
 def _add_external_nodes(externals: dict[str, str], all_nodes: list[dict]) -> None:
@@ -551,3 +611,4 @@ def _add_external_nodes(externals: dict[str, str], all_nodes: list[dict]) -> Non
             })
         elif not node.get("source_file"):
             node["pascal_external"] = True
+            node["label"] = unit
