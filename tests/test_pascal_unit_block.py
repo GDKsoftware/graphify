@@ -370,3 +370,34 @@ def test_node_marker_and_result_copy_are_independent():
     marker = next(n["_pascal_unit"] for n in result["nodes"] if "_pascal_unit" in n)
     assert marker == result["pascal_unit"]
     assert marker is not result["pascal_unit"]
+
+
+def test_block_records_unit_level_values_with_their_section(tmp_path):
+    b = _build(tmp_path, """unit U;
+interface
+const
+  A = 1;
+  B: Integer = 2;
+type
+  TKleur = (kRood, kGroen = 5);
+var
+  V: Integer;
+implementation
+const
+  C = 3;
+var
+  W: Integer;
+procedure P;
+const
+  Local = 1;
+begin
+end;
+end.
+""")
+    assert b["consts"] == {
+        "A": {"interface": True}, "B": {"interface": True},
+        "kRood": {"interface": True}, "kGroen": {"interface": True},
+        "C": {"interface": False},
+    }
+    assert b["global_scope"] == {"V": {"interface": True}, "W": {"interface": False}}
+    assert b["globals"] == {"V": "Integer", "W": "Integer"}

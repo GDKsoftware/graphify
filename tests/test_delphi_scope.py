@@ -461,3 +461,38 @@ def test_regex_and_tree_sitter_report_the_same_raw_calls(monkeypatch):
     assert regex == tree_sitter
     names = {c for c, _ in regex}
     assert {"IntToStr", "Format", "Free", "Create", "Assigned"} <= names
+
+
+# ------------------- unit-level consts and globals shadow routines of used units
+
+
+def _const_run(run):
+    return run("ConstLib.pas", "ConstShadowLib.pas", "ConstUser.pas", "ConstUsed.pas")
+
+
+@pytest.mark.parametrize("label", [
+    "TestConst()",      # own-unit interface const
+    "TestVar()",        # own-unit interface global variable
+    "TestImplConst()",  # own-unit implementation const
+    "TestStatement()",  # bare `Foo;` statement naming an own-unit const
+    "TestLocal()",      # local const
+])
+def test_own_unit_value_shadows_routine_of_used_unit(run, label):
+    g = _const_run(run)
+    assert _calls_from(g, "ConstUser.pas", label) == []
+
+
+def test_used_unit_interface_global_shadows_earlier_routine(run):
+    g = _const_run(run)
+    assert _calls_from(g, "ConstUsed.pas", "TestGlobal()") == []
+
+
+def test_used_unit_implementation_const_does_not_shadow(run):
+    g = _const_run(run)
+    edge = _call(g, ("ConstUsed.pas", "TestImplConst()"), ("ConstLib.pas", "Quux()"))
+    assert edge is not None and edge["rule"] == "5.1/6"
+
+
+def test_enumeration_value_is_not_a_call(run):
+    g = _const_run(run)
+    assert _calls_from(g, "ConstUsed.pas", "TestEnum()") == []

@@ -107,6 +107,9 @@ class SymbolTable:
         self._nested: dict[str, dict[str, dict[str, list[Routine]]]] = {}
         self._globals: dict[str, dict[str, str]] = {}
         self._proc_types: dict[str, set[str]] = {}
+        # Unit -> value identifiers (globals, consts, enumeration values) -> declared
+        # in the interface section.
+        self._values: dict[str, dict[str, bool]] = {}
         self._files: dict[str, str] = {}
         # Unit names declared by more than one scanned file -> their private keys.
         self._ambiguous: dict[str, list[str]] = {}
@@ -173,6 +176,11 @@ class SymbolTable:
             self._files[_norm_path(source)] = name
         self._proc_types[key] = {p.casefold() for p in block.get("proc_types") or ()}
         self._globals[key] = {g.casefold(): t for g, t in (block.get("globals") or {}).items()}
+        values: dict[str, bool] = {g.casefold(): True for g in block.get("globals") or {}}
+        for part in (block.get("global_scope"), block.get("consts")):
+            for vname, flags in (part or {}).items():
+                values[vname.casefold()] = bool((flags or {}).get("interface", True))
+        self._values[key] = values
         self._routines[key] = {
             rname.casefold(): [self._routine(name, rname, e, scanned) for e in entries]
             for rname, entries in (block.get("routines") or {}).items()
@@ -413,6 +421,17 @@ class SymbolTable:
         if raw is None:
             return None
         return self.lookup_type(resolved, raw) or raw
+
+    def declares_value(self, unit: str, name: str, *, interface_only: bool) -> bool:
+        """Whether `unit` declares a global variable, constant or enumeration value `name`.
+
+        A used unit only exposes its interface section (`interface_only`).
+        """
+        resolved = self.resolve_unit_name(unit)
+        if resolved is None:
+            return False
+        flag = self._values.get(resolved.casefold(), {}).get(name.casefold())
+        return flag is not None and (flag or not interface_only)
 
     def is_type(self, unit: str, name: str) -> bool:
         return self.lookup_type(unit, name) is not None

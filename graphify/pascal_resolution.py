@@ -174,6 +174,8 @@ class DelphiResolver:
             found = table.routines(resolved, name, interface_only=True)
             if found:
                 return self._outcome(found, arg_count, "5.1/7")
+            if table.declares_value(resolved, name, interface_only=True):
+                raise _Stop
         return None
 
     def _class_scope(
@@ -207,6 +209,7 @@ class DelphiResolver:
                 table.declares_type(dup, name)
                 or table.routines(dup, name, interface_only=True)
                 or table.global_var(dup, name) is not None
+                or table.declares_value(dup, name, interface_only=True)
             ):
                 raise _Stop
 
@@ -219,6 +222,8 @@ class DelphiResolver:
         found = table.routines(unit, name, interface_only=interface_only)
         if found:
             return self._outcome(found, arg_count, rule)
+        if table.declares_value(unit, name, interface_only=interface_only):
+            raise _Stop  # a variable, constant or enumeration value, not a routine
         return None
 
     # ------------------------------------------------ qualified calls (5.2)

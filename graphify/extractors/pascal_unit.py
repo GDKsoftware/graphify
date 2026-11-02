@@ -164,8 +164,8 @@ def build_pascal_unit(
         impl_types, impl_masked = _scan_types(impl_text, impl_off, typeinfo, proc_lower, nid_stem)
         types.update(impl_types)
 
-    iface_routines, iface_globals = _scan_decls(iface_masked, bodies=False)
-    impl_routines, impl_globals = _scan_decls(impl_masked, bodies=True)
+    iface_routines, iface_globals, iface_consts = _scan_decls(iface_masked, bodies=False)
+    impl_routines, impl_globals, impl_consts = _scan_decls(impl_masked, bodies=True)
     # (stem, routine) pairs; a routine of an include carries the include's stem.
     decls = [(stem, r) for r in iface_routines]
     impls = [(stem, r) for r in impl_routines]
@@ -194,6 +194,17 @@ def build_pascal_unit(
     if not interface_only:
         globals_.update(impl_globals)
 
+    # Unit-level values: whether each is declared in the interface section.
+    scope: dict[str, dict] = {}
+    consts: dict[str, dict] = {}
+    for names, target in ((iface_globals, scope), (iface_consts, consts)):
+        for name in names:
+            target[name] = {"interface": True}
+    if not interface_only:
+        for names, target in ((impl_globals, scope), (impl_consts, consts)):
+            for name in names:
+                target.setdefault(name, {"interface": False})
+
     return {
         "unit": unit_name,
         "module_nid": module_nid,
@@ -204,6 +215,8 @@ def build_pascal_unit(
         "routines": routines,
         "nested": nested,
         "globals": globals_,
+        "global_scope": scope,
+        "consts": consts,
         "proc_types": proc_types,
     }
 
@@ -242,10 +255,10 @@ def _collect_include(
     _types, text = _scan_types(text, 0, [], set(), None)
     stem = _file_stem(found)
     if in_iface:
-        routines, _globals = _scan_decls(text, bodies=False)
+        routines, _globals, _consts = _scan_decls(text, bodies=False)
         decls.extend((stem, r) for r in routines)
     elif not interface_only:
-        routines, _globals = _scan_decls(text, bodies=True)
+        routines, _globals, _consts = _scan_decls(text, bodies=True)
         impls.extend((stem, r) for r in routines)
     for sub_name, _pos in _include_directives(raw):
         _collect_include(
@@ -408,14 +421,25 @@ def _next_statement(text: str, pos: int, *, stop_at_end: bool = False) -> tuple[
 
 # ------------------------------------------------------------------ declarations
 
-def _scan_decls(text: str, *, bodies: bool) -> tuple[list[_Routine], dict[str, str]]:
-    """Top-level routines and global variables of a declaration stream.
+_CONST_NAME_RE = re.compile(r"\s*&?([A-Za-z_]\w*)\s*[:=]")
+_ENUM_TYPE_RE = re.compile(r"\s*&?[A-Za-z_]\w*\s*=\s*\(([^()]*)\)\s*$")
+_ENUM_VALUE_RE = re.compile(r"\s*&?([A-Za-z_]\w*)\s*(?:=.*)?$", re.DOTALL)
+
+
+def _scan_decls(
+    text: str, *, bodies: bool,
+) -> tuple[list[_Routine], dict[str, str], list[str]]:
+    """Top-level routines, global variables and constants of a declaration stream.
+
+    The constants list holds the names of `const` declarations and of the
+    values of enumeration types: all of them are values, never routines.
 
     With ``bodies`` the text is an implementation section: routine bodies and
     their local declarations are skipped, nested routines are recorded.
     """
     routines: list[_Routine] = []
     globs: dict[str, str] = {}
+    consts: list[str] = []
     pos, n, mode = 0, len(text), ""
     while True:
         pos = _skip_filler(text, pos)
@@ -441,11 +465,35 @@ def _scan_decls(text: str, *, bodies: bool) -> tuple[list[_Routine], dict[str, s
         if word in ("var", "threadvar") or class_var:
             mode = "var"
             stmt = stmt[class_var.end() if class_var else len(word):]
-        elif word in ("const", "resourcestring", "type", "label", "uses", "exports"):
-            mode = "skip"
+        elif word in ("const", "resourcestring"):
+            mode = "const"
+            stmt = stmt[len(word):]
+        elif word in ("type", "label", "uses", "exports"):
+            mode = "type" if word == "type" else "skip"
+            if mode == "type":
+                stmt = stmt[len(word):]
         if mode == "var":
             _add_variables(stmt, globs)
-    return routines, globs
+        elif mode == "const":
+            m = _CONST_NAME_RE.match(stmt)
+            if m:
+                consts.append(m.group(1))
+        elif mode == "type":
+            consts.extend(_enum_values(stmt))
+    return routines, globs, consts
+
+
+def _enum_values(stmt: str) -> list[str]:
+    """Value names of an enumeration type declaration `TKleur = (kRood, kGroen)`."""
+    m = _ENUM_TYPE_RE.match(stmt)
+    if not m:
+        return []
+    names = []
+    for part in m.group(1).split(","):
+        v = _ENUM_VALUE_RE.match(part)
+        if v:
+            names.append(v.group(1))
+    return names
 
 
 def _balanced_bracket(text: str, pos: int) -> int:
