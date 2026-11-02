@@ -277,3 +277,50 @@ def test_outcome_picks_the_overload_by_arity():
     assert (res.target, res.confidence, res.score) == (optional.nid, "INFERRED", 0.85)
     res = DelphiResolver._outcome([two, one], None, "5.1/2")
     assert (res.target, res.confidence) == (two.nid, "INFERRED")
+
+
+def _qualified_run(run):
+    return run("Helpers.pas", "Main.pas", "DataMod.pas")
+
+
+def test_unit_qualified_call(run):
+    g = _qualified_run(run)
+    edge = _call(g, ("DataMod.pas", "Laad()"), ("Helpers.pas", "InitCap()"))
+    assert edge is not None and edge["confidence"] == "EXTRACTED"
+    assert edge["rule"] == "5.2/3"
+    target = _routine(g, "Helpers.pas", "InitCap()")["id"]
+    assert [e for e in _calls_from(g, "DataMod.pas", "Laad()") if e["target"] == target] == [edge]
+
+
+def test_global_variable_qualifier(run):
+    g = _qualified_run(run)
+    edge = _call(g, ("DataMod.pas", "Laad()"), ("Main.pas", "DoeIets()"))
+    assert edge is not None and edge["rule"] == "5.2/4"
+
+
+def test_type_qualifier(run):
+    g = _qualified_run(run)
+    edge = _call(g, ("DataMod.pas", "Laad()"), ("Main.pas", "Maak()"))
+    assert edge is not None and edge["rule"] == "5.2/5"
+
+
+def test_typed_field_qualifier(run):
+    g = _qualified_run(run)
+    edge = _call(g, ("DataMod.pas", "Laad()"), ("Main.pas", "Help()"))
+    assert edge is not None and edge["rule"] == "5.2/6"
+
+
+def test_self_qualifier(run):
+    g = _qualified_run(run)
+    assert _call(g, ("DataMod.pas", "Laad()"), ("DataMod.pas", "Laad()")) is None
+
+
+def test_unknown_qualifier_gives_no_edge(run):
+    g = _qualified_run(run)
+    targets = {_node(g, e["target"]).get("label") for e in _calls_from(g, "DataMod.pas", "Laad()")}
+    assert targets == {"InitCap()", "DoeIets()", "Maak()", "Help()"}
+
+
+def test_private_member_of_variable_type_from_other_unit_gives_no_edge(run):
+    g = _qualified_run(run)
+    assert _calls_from(g, "DataMod.pas", "Prive()") == []

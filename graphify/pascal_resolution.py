@@ -58,8 +58,26 @@ def _visible_from_descendant(member: Member, caller_unit: str) -> bool:
     return True
 
 
+def _member_visible(member: Member, caller_unit: str, caller_chain: set[str]) -> bool:
+    """Spec 5.6 for `Obj.Member`; `caller_chain` is the caller's class and its ancestors."""
+    if member.vis in ("public", "published"):
+        return True
+    owner = member.owner.casefold()
+    own_class = bool(caller_chain) and owner in caller_chain
+    same_unit = member.unit.casefold() == caller_unit.casefold()
+    if member.vis == "strict private":
+        return own_class and same_unit
+    if member.vis == "private":
+        return same_unit
+    if member.vis == "strict protected":
+        return own_class
+    if member.vis == "protected":
+        return same_unit or own_class
+    return False
+
+
 class DelphiResolver:
-    """Binds Pascal raw calls following the Delphi scope rules (spec 5.1, 5.2 1-2)."""
+    """Binds Pascal raw calls following the Delphi scope rules (spec 5.1, 5.2)."""
 
     def __init__(self, table: SymbolTable) -> None:
         self.table = table
@@ -87,10 +105,9 @@ class DelphiResolver:
             if qualifier.casefold() == "inherited":
                 cls = self.table.caller_class(unit, enclosing)
                 return self._class_scope(unit, cls, callee, arg_count, own=False, prefix="5.2/2")
+            return self._qualified(unit, enclosing, qualifier, callee, arg_count)
         except _Stop:
             return None
-        # Other qualifiers (unit, global variable, type, field) are not bound yet.
-        return None
 
     # ------------------------------------------------------------ the rules
 
@@ -175,6 +192,132 @@ class DelphiResolver:
         found = table.routines(unit, name, interface_only=interface_only)
         if found:
             return self._outcome(found, arg_count, rule)
+        return None
+
+    # ------------------------------------------------ qualified calls (5.2)
+
+    def _qualified(
+        self, unit: str, enclosing: Sequence[str], qualifier: str, name: str,
+        arg_count: int | None,
+    ) -> Resolution | None:
+        """Spec 5.2, points 3-7: unit, global variable, type, typed field."""
+        table = self.table
+        parts = qualifier.split(".")
+        for end in range(len(parts), 0, -1):
+            prefix = ".".join(parts[:end])
+            if table.duplicates(prefix):
+                raise _Stop  # which unit the compiler takes is unknown
+            resolved = table.resolve_unit_name(prefix)
+            if resolved is not None:
+                return self._in_unit(unit, enclosing, resolved, parts[end:], name, arg_count)
+        if len(parts) > 1:
+            return None  # a member chain (`A.B.Foo`) on something that is not a unit
+        cls = table.caller_class(unit, enclosing)
+        own_field = self._own_field(unit, cls, qualifier)
+        global_type = self._global_type(unit, qualifier)
+        type_name = table.lookup_type(unit, qualifier)
+        if global_type is not None:
+            if own_field is not None:
+                raise _Stop  # a field of the class hides the global: not told apart
+            return self._type_scope(unit, cls, global_type, name, arg_count, "5.2/4")
+        if type_name is not None:
+            if own_field is not None:
+                raise _Stop
+            return self._type_scope(unit, cls, type_name, name, arg_count, "5.2/5")
+        if own_field is not None:
+            return self._field_scope(unit, cls, own_field, name, arg_count)
+        return None  # point 7: not known, so no edge
+
+    def _in_unit(
+        self, caller_unit: str, enclosing: Sequence[str], target: str, rest: list[str],
+        name: str, arg_count: int | None,
+    ) -> Resolution | None:
+        table = self.table
+        if not rest:
+            own = target.casefold() == caller_unit.casefold()
+            return self._unit_scope(target, name, arg_count, "5.2/3", interface_only=not own)
+        if len(rest) > 1:
+            return None
+        cls = table.caller_class(caller_unit, enclosing)
+        var_type = table.global_var(target, rest[0])
+        if var_type is not None:
+            return self._type_scope(caller_unit, cls, var_type, name, arg_count, "5.2/3")
+        if table.declares_type(target, rest[0]):
+            qualified = table.lookup_type(target, rest[0])
+            if qualified is not None:
+                return self._type_scope(caller_unit, cls, qualified, name, arg_count, "5.2/3")
+        return None
+
+    def _global_type(self, unit: str, name: str) -> str | None:
+        """Type of the global variable `name` as seen from `unit` (rules 4-6 order).
+
+        Raises `_Stop` when a duplicated unit that is in scope declares it, or
+        when the variable is known but its type is not.
+        """
+        table = self.table
+        own = table.unit(unit)
+        if own is None:
+            return None
+        levels: list[str] = [own.name]
+        for used in (*reversed(own.implementation_uses), *reversed(own.interface_uses)):
+            resolved = table.resolve_unit_name(used)
+            if resolved is None:
+                for dup in table.duplicates(used):
+                    if table.global_var(dup, name) is not None:
+                        raise _Stop
+                continue
+            levels.append(resolved)
+        for level in levels:
+            found = table.global_var(level, name)
+            if found is not None:
+                if table.type(found) is None:
+                    raise _Stop  # the type is not in the table
+                return found
+        return None
+
+    def _own_field(self, unit: str, cls: str | None, name: str) -> Member | None:
+        """Field or property `name` of the caller's class or an ancestor, if any."""
+        if cls is None:
+            return None
+        table = self.table
+        for owner in (cls, *table.ancestors(cls)):
+            found = [
+                m for m in table.members(owner, name)
+                if owner == cls or _visible_from_descendant(m, unit)
+            ]
+            if found:
+                return found[0]
+        return None
+
+    def _field_scope(
+        self, unit: str, cls: str | None, member: Member, name: str, arg_count: int | None,
+    ) -> Resolution | None:
+        """Point 6: search the declared type of a field or property."""
+        if member.kind not in ("field", "property") or member.proc_type or not member.type:
+            raise _Stop
+        if self.table.is_proc_typed(member.owner, member.name):
+            raise _Stop
+        qualified = self.table.lookup_type(member.unit, member.type)
+        if qualified is None:
+            raise _Stop
+        return self._type_scope(unit, cls, qualified, name, arg_count, "5.2/6")
+
+    def _type_scope(
+        self, unit: str, cls: str | None, qualified: str, name: str,
+        arg_count: int | None, rule: str,
+    ) -> Resolution | None:
+        """Search a type and its ancestors with the visibility of spec 5.6."""
+        table = self.table
+        if table.type(qualified) is None:
+            return None
+        caller_chain = {c.casefold() for c in ([cls, *table.ancestors(cls)] if cls else [])}
+        for owner in (qualified, *table.ancestors(qualified)):
+            found = [
+                m for m in table.members(owner, name)
+                if _member_visible(m, unit, caller_chain)
+            ]
+            if found:
+                return self._outcome(found, arg_count, rule)
         return None
 
     # -------------------------------------------------- candidates to an edge
