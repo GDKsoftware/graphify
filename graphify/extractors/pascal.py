@@ -655,6 +655,27 @@ def _extract_pascal_regex(path: Path) -> dict:
     _attach_pascal_unit(path, raw, stem, nodes, result)
     return result
 
+_PAS_MODULE_KEYWORDS = frozenset({"kUnit", "kProgram", "kLibrary"})
+
+
+def _pascal_tree_lost_module(root: Any) -> bool:
+    """Whether tree-sitter saw a unit/program/library header but could not
+    parse the file as one.
+
+    The grammar then wraps the file in an ERROR node (code that only compiles
+    with one `{$IFDEF}` branch, such as a `begin` in both branches, is
+    enough): there is no module node, the routines after the damage come out
+    as loose headers and blocks, and the unit symbol block has no node to go
+    on, so the resolver would drop every call in the file.
+    """
+    if any(c.type in ("unit", "program", "library") for c in root.children):
+        return False
+    candidates = [root, *(c for c in root.children if c.type == "ERROR")]
+    return any(
+        c.type in _PAS_MODULE_KEYWORDS for node in candidates for c in node.children
+    )
+
+
 def extract_pascal(path: Path) -> dict:
     """Extract units, classes, procedures, uses-imports, and calls from Pascal/Delphi files.
 
@@ -695,6 +716,8 @@ def extract_pascal(path: Path) -> dict:
         tree = parser.parse(source)
         root = tree.root_node
     except Exception:
+        return _extract_pascal_regex(path)
+    if _pascal_tree_lost_module(root):
         return _extract_pascal_regex(path)
 
     stem = _file_stem(path)
