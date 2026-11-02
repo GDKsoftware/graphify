@@ -14,6 +14,9 @@ from graphify.extractors.pascal_calls import (
     split_callee,
 )
 
+from graphify.extractors.base import _file_stem, _make_id
+
+NESTED = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Nested.pas"
 CALLS = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Calls.pas"
 
 
@@ -98,6 +101,13 @@ def test_arg_count_counts_top_level_only(extractor):
 def test_nested_routine_has_node_and_enclosing_chain(extractor):
     r = extractor(CALLS)
     assert "Inner()" in _labels(r["nodes"]).values()
+    inner = _make_id(_file_stem(CALLS), "TFoo.Q.Inner")
+    assert inner in _labels(r["nodes"])
+    assert any(
+        e["relation"] == "contains" and e["target"] == inner
+        and e["source"] == _make_id(_file_stem(CALLS), "TFoo.Q")
+        for e in r["edges"]
+    )
     assert _rc(r, "InitCap")["enclosing_routines"] == ["TFoo.Q.Inner", "TFoo.Q"]
 
 
@@ -119,9 +129,42 @@ def test_bare_inherited_names_current_method(extractor):
     r = extractor(CALLS)
     inherited = [c for c in r["raw_calls"] if c["qualifier"] == "inherited"]
     assert len(inherited) == 2
+    bare = [c for c in inherited if c["arg_count"] == 0]
+    assert [c["callee"] for c in bare] == ["Q"]
     assert all(c["is_member_call"] is False for c in inherited)
 
 
 @pytest.mark.parametrize("extractor", _extractors())
 def test_expression_receiver_is_member_call(extractor):
     assert _rc(extractor(CALLS), "Refresh")["is_member_call"] is True
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_routine_after_asm_or_external_routine_stays_top_level(extractor):
+    r = extractor(NESTED)
+    ids = _labels(r["nodes"])
+    for name in ("Next", "Ext", "After", "Last"):
+        nid = _make_id(_file_stem(NESTED), name)
+        assert nid in ids, name
+        assert any(
+            e["relation"] == "contains" and e["target"] == nid
+            and e["source"] == _make_id(_file_stem(NESTED), "Nested")
+            for e in r["edges"]
+        ), name
+    assert _make_id(_file_stem(NESTED), "Fast.Next") not in ids
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_sibling_after_routine_with_nested_stays_top_level(extractor):
+    r = extractor(NESTED)
+    assert _make_id(_file_stem(NESTED), "TBar.M.Inner") in _labels(r["nodes"])
+    assert _make_id(_file_stem(NESTED), "Last") in _labels(r["nodes"])
+    assert _make_id(_file_stem(NESTED), "TBar.M.Last") not in _labels(r["nodes"])
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_bare_inherited_in_nested_routine_names_the_method(extractor):
+    r = extractor(NESTED)
+    inherited = [c for c in r["raw_calls"] if c["qualifier"] == "inherited"]
+    assert [c["callee"] for c in inherited] == ["M"]
+    assert inherited[0]["enclosing_routines"] == ["TBar.M.Inner", "TBar.M"]

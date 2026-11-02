@@ -65,7 +65,7 @@ _PAS_IMPL_HEADER_RE = re.compile(
 _PAS_NO_BODY_RE = re.compile(
     r"\s*(?:[a-z]+\s*;\s*)*?(?:forward|external)\b", re.IGNORECASE
 )
-_PAS_BEGIN_RE = re.compile(r"\bbegin\b", re.IGNORECASE)
+_PAS_BEGIN_RE = re.compile(r"\b(begin|asm)\b", re.IGNORECASE)
 _PAS_DECL_SECTION_RE = re.compile(
     r"\b(?:var|const)\b(.*?)(?=\b(?:var|const|type|label|procedure|function|"
     r"constructor|destructor|operator|threadvar|resourcestring)\b|\Z)",
@@ -198,6 +198,10 @@ def _pascal_find_body(text: str, start: int) -> tuple[int, int]:
     if not m:
         return (0, 0)
     body_start = start + m.end()
+    return (body_start, _pascal_block_end(text, body_start))
+
+def _pascal_block_end(text: str, body_start: int) -> int:
+    """Offset of the `end` that closes the block opened just before body_start."""
     depth = 1
     for tok in _PAS_BEGIN_END_TOKEN_RE.finditer(text, body_start):
         kw = tok.group(1).lower()
@@ -206,8 +210,8 @@ def _pascal_find_body(text: str, start: int) -> tuple[int, int]:
         elif kw == "end":
             depth -= 1
             if depth == 0:
-                return (body_start, tok.start())
-    return (body_start, len(text))
+                return tok.start()
+    return len(text)
 
 @dataclass
 class _PascalRoutine:
@@ -236,7 +240,9 @@ def _pascal_scan_routine(text: str, hm: re.Match, parent: _PascalRoutine | None)
     while True:
         nh = _PAS_IMPL_HEADER_RE.search(text, cur)
         bm = _PAS_BEGIN_RE.search(text, cur)
-        header_first = nh is not None and (bm is None or nh.start() < bm.start())
+        if bm is None:
+            return r  # no body at all: must not swallow the routines after it
+        header_first = nh is not None and nh.start() < bm.start()
         # A qualified header (`TFoo.Bar`) is never nested: this one has no body.
         if header_first and "." in nh.group("qual"):
             return r
@@ -245,8 +251,12 @@ def _pascal_scan_routine(text: str, hm: re.Match, parent: _PascalRoutine | None)
             r.children.append(child)
             cur = r.end_pos = child.end_pos
             continue
-        if bm:
-            r.decl_end = bm.start()
+        r.decl_end = bm.start()
+        if bm.group(1).lower() == "asm":
+            # Assembler body: skipped (no calls read from it), but it must end
+            # the routine so the next header is not taken as nested.
+            r.end_pos = _pascal_block_end(text, bm.end())
+        else:
             r.body_start, r.body_end = _pascal_find_body(text, cur)
             r.end_pos = r.body_end
         return r
@@ -524,7 +534,9 @@ def _extract_pascal_regex(path: Path) -> dict:
     # a call, source-case routine name)
     impl_scope: dict[str, tuple[list[str], set[str], str]] = {}
 
-    def _add_routine(r: _PascalRoutine, parent_nid: str | None, shadow: set[str]) -> None:
+    def _add_routine(
+        r: _PascalRoutine, parent_nid: str | None, shadow: set[str], outer_method: str = "",
+    ) -> None:
         line = _lineno(stripped, impl_off + r.header_start)
         if parent_nid is not None:
             container, relation = parent_nid, "contains"
@@ -553,9 +565,9 @@ def _extract_pascal_regex(path: Path) -> dict:
         while outer is not None:
             chain.append(outer.qualified)
             outer = outer.parent
-        impl_scope[proc_nid] = (chain, shadow, method_name)
+        impl_scope[proc_nid] = (chain, shadow, method_name if parent_nid is None else outer_method)
         for child in r.children:
-            _add_routine(child, proc_nid, shadow)
+            _add_routine(child, proc_nid, shadow, method_name if parent_nid is None else outer_method)
 
     for routine in _pascal_scan_routines(impl_text):
         _add_routine(routine, None, set())
