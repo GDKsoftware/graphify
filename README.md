@@ -404,6 +404,26 @@ viz_node_limit=0
 
 The declaration flows through classification, extractor selection, grammar and resolution, imports, `graphify watch`, and the AST cache (a file re-parsed under a different language never reuses the old entry), and the same `.graphifyrc` is read by `extract`, `update`, the hooks, the MCP server, and the `/graphify` skill. A typo is reported once on stderr and the scan continues with the defaults. How declarations interact with caching, incremental rebuilds, and import resolution: **[Configuration](https://docs.graphify.com/reference/configuration)**.
 
+**Delphi / Pascal.** With the `pascal` extra, graphify binds Pascal calls by Delphi's scope rules (own class and ancestors, the unit, the `uses` clauses, `with` blocks of a known type) and no longer matches a Pascal call to a same-named routine by name alone; a call it cannot bind produces no edge. Calls into the RTL, VCL or other System units point at the unit's stub node (marked `pascal_external`, which keeps it out of god nodes and surprising connections) instead of an unrelated routine in your code. Three optional keys tune this; relative paths are resolved from the directory of the `.graphifyrc`:
+
+```
+# .graphifyrc
+# The project file: its unit scope names and unit search path (used for {$I} includes) are read from it.
+pascal.dproj=src/MyApp.dproj
+# Which Delphi version's symbols to use (default: the one the .dproj implies, else the newest available). "none" disables them.
+pascal.delphi_version=13.2
+# A symbol file, or a directory of them (default: the package's own graphify/data/delphi/ directory)
+pascal.delphi_symbols=tools/delphi-symbols
+```
+
+graphify ships no Delphi symbol file. Without one, calls into the RTL/VCL stay unresolved. Generate one from your own licensed Delphi sources and point `pascal.delphi_symbols` at it (a path that does not exist gives a warning and falls back to the package directory):
+
+```
+python -m tools.delphi_symbols <source_root> --version 13.2 [--out PATH] [--generated-at YYYY-MM-DD]
+```
+
+The generator lives in the source repository (`tools/delphi_symbols`), runs at build time and is not part of the installed package.
+
 ---
 
 ## Team setup
