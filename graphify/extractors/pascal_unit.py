@@ -696,3 +696,58 @@ def _drop_private(types: dict[str, dict]) -> None:
             for name, entries in tdef["members"].items()
             if (kept := [e for e in entries if e["vis"] not in ("private", "strict private")])
         }
+
+
+# --- keeping the block's node ids in step with the graph --------------------
+#
+# The block names nodes by id, but extract() rewrites node ids after the
+# extractors ran (checkout-path prefixes, salting of colliding ids, ...). The
+# block therefore follows the nodes: snapshot every node's id and file before
+# the rewrites, and afterwards map each block id through (file, old id) -> new
+# id. An id without a node of its own (an interface method, a routine from an
+# include file) cannot be followed and becomes None, so the block never names a
+# node the graph does not hold.
+
+
+def snapshot_node_ids(nodes: list[dict]) -> dict[int, tuple[str | None, str | None]]:
+    """(id, source_file) of every node, keyed by the node object."""
+    return {id(n): (n.get("id"), n.get("source_file")) for n in nodes}
+
+
+def follow_node_ids(
+    nodes: list[dict], snapshot: dict[int, tuple[str | None, str | None]], per_file: list,
+) -> None:
+    """Rewrite the ids in every `_pascal_unit` block (on the nodes and in the
+    per-file results) to the final node ids; see the section comment above."""
+    final: dict[tuple[str | None, str], str] = {}
+    for n in nodes:
+        old = snapshot.get(id(n))
+        if old is not None and isinstance(old[0], str) and isinstance(n.get("id"), str):
+            final[(old[1], old[0])] = n["id"]
+    known = {n.get("id") for n in nodes}
+
+    def _walk(value, source_file) -> None:  # type: ignore[no-untyped-def]
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ("nid", "module_nid") and isinstance(item, str):
+                    new = final.get((source_file, item))
+                    value[key] = new if new in known else None
+                else:
+                    _walk(item, source_file)
+        elif isinstance(value, list):
+            for item in value:
+                _walk(item, source_file)
+
+    for n in nodes:
+        old = snapshot.get(id(n))
+        if old is not None and isinstance(n.get("_pascal_unit"), dict):
+            _walk(n["_pascal_unit"], old[1])
+    # The per-file copy is read by the in-process cross-file pass; the node
+    # marker is what graph.json persists. Both are kept in step.
+    for result in per_file:
+        block = result.get("pascal_unit") if isinstance(result, dict) else None
+        if not isinstance(block, dict):
+            continue
+        owner = next((n for n in result.get("nodes", ()) if "_pascal_unit" in n), None)
+        old = snapshot.get(id(owner)) if owner is not None else None
+        _walk(block, old[1] if old is not None else None)

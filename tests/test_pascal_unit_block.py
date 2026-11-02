@@ -295,12 +295,78 @@ def test_uses_are_deduplicated_case_insensitively(tmp_path):
     assert block["implementation_uses"] == ["Foo", "Bar"]
 
 
+def _block_nids(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in ("nid", "module_nid"):
+                yield item
+            else:
+                yield from _block_nids(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _block_nids(item)
+
+
+def _assert_blocks_follow_nodes(result):
+    node_ids = {n["id"] for n in result["nodes"]}
+    blocks = [n["_pascal_unit"] for n in result["nodes"] if "_pascal_unit" in n]
+    assert blocks
+    for block in blocks:
+        for nid in _block_nids(block):
+            assert nid is None or nid in node_ids, nid
+
+
+UNIT_WITH_CLASS = """unit Foo;
+interface
+type
+  TX = class
+  public
+    procedure M;
+  end;
+implementation
+procedure TX.M;
+begin
+end;
+end.
+"""
+
+
 def test_block_node_ids_follow_the_id_remap(tmp_path):
     from graphify.extract import extract
 
-    (tmp_path / "A.pas").write_text("unit A;\ninterface\nimplementation\nend.\n", encoding="utf-8")
-    (tmp_path / "B.pas").write_text("unit B;\ninterface\nimplementation\nend.\n", encoding="utf-8")
+    (tmp_path / "inc").mkdir()
+    (tmp_path / "inc" / "shared.inc").write_text(
+        "procedure FromInc;\nbegin\nend;\n", encoding="utf-8")
+    unit_a = UNIT_WITH_CLASS.replace("Foo", "A").replace(
+        "implementation\n", "implementation\n{$I inc/shared.inc}\n")
+    (tmp_path / "A.pas").write_text(unit_a, encoding="utf-8")
+    (tmp_path / "B.pas").write_text(UNIT_WITH_CLASS.replace("Foo", "B"), encoding="utf-8")
     result = extract([tmp_path / "A.pas", tmp_path / "B.pas"])
+    _assert_blocks_follow_nodes(result)
     module_ids = {n["id"] for n in result["nodes"] if n["label"] in ("A", "B")}
-    block_ids = {n["_pascal_unit"]["module_nid"] for n in result["nodes"] if "_pascal_unit" in n}
-    assert block_ids == module_ids
+    assert {n["_pascal_unit"]["module_nid"] for n in result["nodes"] if "_pascal_unit" in n} == module_ids
+    block = next(n["_pascal_unit"] for n in result["nodes"] if n["label"] == "A")
+    method_ids = {n["id"] for n in result["nodes"] if n["label"] == "M()"}
+    assert block["types"]["TX"]["members"]["M"][0]["nid"] in method_ids
+    # an include routine has no node of its own: dropped, never dangling
+    assert block["routines"]["FromInc"][0]["nid"] is None
+
+
+def test_block_node_ids_follow_collision_salting(tmp_path):
+    from graphify.extract import extract
+
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "Foo.pas").write_text(UNIT_WITH_CLASS, encoding="utf-8")
+    (tmp_path / "x_Foo.pas").write_text(UNIT_WITH_CLASS, encoding="utf-8")
+    result = extract([tmp_path / "x" / "Foo.pas", tmp_path / "x_Foo.pas"])
+    foo_ids = [n["id"] for n in result["nodes"] if n["label"] == "Foo"]
+    assert len(set(foo_ids)) == 2
+    _assert_blocks_follow_nodes(result)
+    assert {n["_pascal_unit"]["module_nid"] for n in result["nodes"] if "_pascal_unit" in n} == set(foo_ids)
+
+
+def test_node_marker_and_result_copy_are_independent():
+    result = extract_pascal(DECLS)
+    marker = next(n["_pascal_unit"] for n in result["nodes"] if "_pascal_unit" in n)
+    assert marker == result["pascal_unit"]
+    assert marker is not result["pascal_unit"]

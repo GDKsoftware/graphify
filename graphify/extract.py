@@ -51,6 +51,7 @@ from graphify.extractors.base import (  # noqa: F401
     set_active_scan_root,
 )
 from graphify.extractors.apex import extract_apex  # noqa: F401
+from graphify.extractors.pascal_unit import follow_node_ids, snapshot_node_ids
 from graphify.extractors.bash import extract_bash  # noqa: F401
 from graphify.extractors.blade import extract_blade  # noqa: F401
 from graphify.extractors.cobol import extract_cobol  # noqa: F401
@@ -4253,31 +4254,6 @@ def _augment_js_reexport_edges(
 
 
 # Header / implementation file-extension pairing for the decl/def class merge.
-
-
-def _remap_pascal_unit_nids(all_nodes: list, per_file: list, remap) -> None:  # type: ignore[no-untyped-def]
-    """Rewrite the node ids inside each Pascal `_pascal_unit` block through an id
-    remap, so the block keeps naming the nodes the graph holds and never carries
-    the on-disk location. `remap(nid, source_file)` returns the new id or None."""
-    def _walk(value, source_file) -> None:  # type: ignore[no-untyped-def]
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key in ("nid", "module_nid") and isinstance(item, str):
-                    new = remap(item, source_file)
-                    if new is not None:
-                        value[key] = new
-                else:
-                    _walk(item, source_file)
-        elif isinstance(value, list):
-            for item in value:
-                _walk(item, source_file)
-
-    for n in all_nodes:
-        if isinstance(n.get("_pascal_unit"), dict):
-            _walk(n["_pascal_unit"], n.get("source_file"))
-    for result in per_file:
-        if isinstance(result, dict) and isinstance(result.get("pascal_unit"), dict):
-            _walk(result["pascal_unit"], (result.get("nodes") or [{}])[0].get("source_file"))
 
 
 def _remap_objc_field_tables(per_file: list, mapping: dict) -> None:
@@ -10310,6 +10286,7 @@ def extract(
         except (OSError, RuntimeError):
             return new
 
+    _pascal_id_snapshot = snapshot_node_ids(all_nodes)
     if id_remap:
         for n in all_nodes:
             _new = _remapped(n.get("id"), n.get("source_file"))
@@ -10400,23 +10377,6 @@ def extract(
                 old_nid = old_pref + canonical_nid[len(new_pref):]
                 if old_nid != canonical_nid:
                     edge_alias_candidates.setdefault(old_nid, set()).add(canonical_nid)
-        def _pascal_unit_prefix(nid, sf):  # type: ignore[no-untyped-def]
-            try:
-                entry = prefix_remap.get(_resolved(sf)) if sf else None
-            except Exception:
-                return None
-            for old_pref, new_pref in entry or ():
-                if nid.startswith(old_pref + "_"):
-                    return new_pref + nid[len(old_pref):]
-            # An include file's routines carry the include's own stem: strip the
-            # scan-root part that the unit's own prefix lost.
-            for old_pref, new_pref in entry or ():
-                root = old_pref[: len(old_pref) - len(new_pref)] if old_pref.endswith(new_pref) else ""
-                if root and nid.startswith(root):
-                    return nid[len(root):]
-            return None
-
-        _remap_pascal_unit_nids(all_nodes, per_file, _pascal_unit_prefix)
         if sym_remap:
             for n in all_nodes:
                 if n.get("id") in sym_remap:
@@ -11515,6 +11475,9 @@ def extract(
         _df = _item.get("definition_file")
         if _df and "\\" in str(_df):
             _item["definition_file"] = PurePath(_df).as_posix()
+
+    # The Pascal symbol blocks name nodes by id: bring them to the final ids.
+    follow_node_ids(all_nodes, _pascal_id_snapshot, per_file)
 
     return {
         "nodes": all_nodes,

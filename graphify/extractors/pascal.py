@@ -1,6 +1,7 @@
 """pascal — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
 
+import copy
 import re
 from graphify.extractors.base import _file_stem, _make_id, _read_source_bytes, _read_source_text
 from graphify.extractors.pascal_calls import count_args, make_raw_call, split_callee
@@ -397,7 +398,9 @@ def _attach_pascal_unit(path: Path, raw: str, stem: str, nodes: list[dict], resu
     from graphify.extractors.pascal_unit import build_pascal_unit
 
     block = build_pascal_unit(path, raw, stem=stem)
-    result["pascal_unit"] = block
+    # Two independent copies: the node marker is persisted, the result copy is
+    # read in-process; extract() keeps both in step with the final node ids.
+    result["pascal_unit"] = copy.deepcopy(block)
     by_id = {n["id"]: n for n in nodes}
     target = by_id.get(block["module_nid"])
     if target is not None:
