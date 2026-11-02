@@ -15,11 +15,10 @@ available, and links the interface's method to every implementing method:
 For a static structural graph the question a call through the interface asks
 is "what can this reach", not "which one does it reach at runtime" — with N
 implementers the answer is all N, not none. Each implementer is still subject
-to the single-owner guard `resolve_pascal_inherited_calls` and
-`resolve_ruby_member_calls` already use: an implementer that itself declares
-more than one method of the same name is ambiguous and is skipped on its own,
-independently of its siblings, unless the overloads pair up one-to-one by
-signature or parameter count (C#, #4584).
+to the single-owner guard `resolve_ruby_member_calls` already uses: an
+implementer that itself declares more than one method of the same name is
+ambiguous and is skipped on its own, independently of its siblings, unless the
+overloads pair up one-to-one by signature or parameter count (C#, #4584).
 
 The join is per method rather than per call site, so one edge per implementer
 reconnects every call that reaches the interface method. Confidence is

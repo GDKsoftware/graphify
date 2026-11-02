@@ -172,15 +172,16 @@ def test_pascal_valued_enum_literals_are_not_nodes(tmp_path):
     assert cases == {"clRed", "clGreen"}
 
 
-def test_pascal_finds_calls():
-    from graphify.extract import extract_pascal
-    r = extract_pascal(FIXTURES / "sample.pas")
+def test_pascal_finds_calls(tmp_path):
+    # Calls are bound by the Delphi scope resolver after extraction.
+    from graphify.extract import extract
+    r = extract([FIXTURES / "sample.pas"], cache_root=tmp_path, parallel=False)
     assert "calls" in _relations(r)
 
 
-def test_pascal_call_edges_have_call_context():
-    from graphify.extract import extract_pascal
-    r = extract_pascal(FIXTURES / "sample.pas")
+def test_pascal_call_edges_have_call_context(tmp_path):
+    from graphify.extract import extract
+    r = extract([FIXTURES / "sample.pas"], cache_root=tmp_path, parallel=False)
     call_edges = _edges_with_relation(r, "calls")
     assert call_edges
     assert all(e.get("context") == "call" for e in call_edges)

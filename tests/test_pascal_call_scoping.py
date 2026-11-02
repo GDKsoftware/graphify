@@ -10,8 +10,10 @@ producing wrong cross-class `calls` edges. See `sample_scoped_calls.pas`.
 """
 from __future__ import annotations
 
-import pytest
+import sys
 from pathlib import Path
+
+import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_PATH = FIXTURES / "sample_scoped_calls.pas"
@@ -20,6 +22,18 @@ FIXTURE_PATH = FIXTURES / "sample_scoped_calls.pas"
 def _extractors():
     from graphify.extract import extract_pascal, _extract_pascal_regex
     return [extract_pascal, _extract_pascal_regex]
+
+
+def _graph(variant: int, monkeypatch, tmp_path) -> dict:
+    """Extract the fixture through `extract()`, where calls are bound.
+
+    Variant 1 forces the regex extractor: `extract_pascal` imports
+    tree_sitter_pascal at call time and falls back when that fails.
+    """
+    from graphify.extract import extract
+    if variant == 1:
+        monkeypatch.setitem(sys.modules, "tree_sitter_pascal", None)
+    return extract([FIXTURE_PATH], cache_root=tmp_path, parallel=False)
 
 
 def _class_node_id(r, class_label):
@@ -50,8 +64,8 @@ def _has_call(r, src_id, tgt_id):
     pytest.param(0, id="tree-sitter"),
     pytest.param(1, id="regex-fallback"),
 ])
-def test_calls_scoped_to_own_class(extract):
-    r = _extractors()[extract](FIXTURE_PATH)
+def test_calls_scoped_to_own_class(extract, monkeypatch, tmp_path):
+    r = _graph(extract, monkeypatch, tmp_path)
     first_configure = _method_node_id(r, "TFirstWidget", "Configure()")
     first_reset = _method_node_id(r, "TFirstWidget", "Reset()")
     assert _has_call(r, first_configure, first_reset)
@@ -61,8 +75,8 @@ def test_calls_scoped_to_own_class(extract):
     pytest.param(0, id="tree-sitter"),
     pytest.param(1, id="regex-fallback"),
 ])
-def test_calls_do_not_cross_unrelated_classes(extract):
-    r = _extractors()[extract](FIXTURE_PATH)
+def test_calls_do_not_cross_unrelated_classes(extract, monkeypatch, tmp_path):
+    r = _graph(extract, monkeypatch, tmp_path)
     first_configure = _method_node_id(r, "TFirstWidget", "Configure()")
     second_reset = _method_node_id(r, "TSecondWidget", "Reset()")
     assert not _has_call(r, first_configure, second_reset), (
@@ -76,8 +90,8 @@ def test_calls_do_not_cross_unrelated_classes(extract):
     pytest.param(0, id="tree-sitter"),
     pytest.param(1, id="regex-fallback"),
 ])
-def test_calls_scoped_other_direction(extract):
-    r = _extractors()[extract](FIXTURE_PATH)
+def test_calls_scoped_other_direction(extract, monkeypatch, tmp_path):
+    r = _graph(extract, monkeypatch, tmp_path)
     second_configure = _method_node_id(r, "TSecondWidget", "Configure()")
     second_reset = _method_node_id(r, "TSecondWidget", "Reset()")
     first_reset = _method_node_id(r, "TFirstWidget", "Reset()")
@@ -92,8 +106,8 @@ def test_calls_scoped_other_direction(extract):
     pytest.param(0, id="tree-sitter"),
     pytest.param(1, id="regex-fallback"),
 ])
-def test_calls_resolve_via_ancestor_chain(extract):
-    r = _extractors()[extract](FIXTURE_PATH)
+def test_calls_resolve_via_ancestor_chain(extract, monkeypatch, tmp_path):
+    r = _graph(extract, monkeypatch, tmp_path)
     derived_run = _method_node_id(r, "TDerivedWidget", "Run()")
     base_prepare = _method_node_id(r, "TBaseWidget", "Prepare()")
     assert _has_call(r, derived_run, base_prepare), (

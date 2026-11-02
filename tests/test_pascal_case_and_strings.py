@@ -19,6 +19,7 @@ temp directory.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,16 @@ PROJECT = FIXTURES / "Project.dpr"
 def _extractors():
     from graphify.extract import _extract_pascal_regex, extract_pascal
     return [extract_pascal, _extract_pascal_regex]
+
+
+def _graph(extractor, path: Path, monkeypatch, tmp_path) -> dict:
+    """Extract `path` through `extract()`, where calls are bound, with the given
+    extractor: the regex one is forced by making the tree_sitter_pascal import
+    in `extract_pascal` fail."""
+    from graphify.extract import _extract_pascal_regex
+    if extractor is _extract_pascal_regex:
+        monkeypatch.setitem(sys.modules, "tree_sitter_pascal", None)
+    return extract([path], cache_root=tmp_path, parallel=False)
 
 
 def _called_labels(result: dict, caller_label: str) -> set[str]:
@@ -120,13 +131,14 @@ def test_doubled_quote_string_is_fully_masked(extractor):
 
 
 @pytest.mark.parametrize("extractor", _extractors())
-def test_end_keyword_in_string_does_not_cut_body(extractor):
-    assert {"Volgende()", "Tweede()"} <= _called_labels(extractor(STRINGS), "Doe()")
+def test_end_keyword_in_string_does_not_cut_body(extractor, monkeypatch, tmp_path):
+    r = _graph(extractor, STRINGS, monkeypatch, tmp_path)
+    assert {"Volgende()", "Tweede()"} <= _called_labels(r, "Doe()")
 
 
 @pytest.mark.parametrize("extractor", _extractors())
-def test_masking_preserves_call_line_numbers(extractor):
-    r = extractor(STRINGS)
+def test_masking_preserves_call_line_numbers(extractor, monkeypatch, tmp_path):
+    r = _graph(extractor, STRINGS, monkeypatch, tmp_path)
     assert _call_line(r, "Doe()", "Volgende()") == _line_of(STRINGS, "Log('end;'); Volgende;")
     assert _call_line(r, "Doe()", "Tweede()") == _line_of(STRINGS, "Eerste('x'); Tweede;")
 
@@ -139,10 +151,35 @@ def test_multiline_string_content_is_not_code(extractor):
 
 
 @pytest.mark.parametrize("extractor", _extractors())
-def test_multiline_string_keeps_following_calls(extractor):
-    r = extractor(MULTILINE)
+def test_multiline_string_keeps_following_calls(extractor, monkeypatch, tmp_path):
+    r = _graph(extractor, MULTILINE, monkeypatch, tmp_path)
     assert {"Volgende()", "Tweede()"} <= _called_labels(r, "Doe2()")
     assert _call_line(r, "Doe2()", "Tweede()") == _line_of(MULTILINE, "Tweede;")
+
+
+QUOTE_RUN = FIXTURES / "QuoteRun.pas"
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_quote_run_inside_a_line_keeps_the_unit_and_its_routines(extractor):
+    # `'f(''' + A + ''',' + B + ')'`: a string that ends in a doubled quote,
+    # so `'''` sits in the middle of a line. tree-sitter-pascal lexes that run
+    # as the opening of a Delphi 12 multiline string and loses the rest of the
+    # file: the unit node, every routine after it and with them the symbol
+    # block the call resolver reads.
+    r = extractor(QUOTE_RUN)
+    labels = set(_labels(r["nodes"]).values())
+    assert {"QuoteRun", "Plak()", "Bouw()", "Verder()"} <= labels
+    assert any("_pascal_unit" in n for n in r["nodes"])
+    assert {"plak", "verder"} <= _raw_callees(r)
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_quote_run_inside_a_line_keeps_the_calls(extractor, monkeypatch, tmp_path):
+    r = _graph(extractor, QUOTE_RUN, monkeypatch, tmp_path)
+    assert {"Plak()", "Verder()"} <= _called_labels(r, "Bouw()")
+    assert _call_line(r, "Bouw()", "Verder()") == _line_of(QUOTE_RUN, "Verder;")
+    assert "Plak()" in _called_labels(r, "Verder()")
 
 
 def test_uses_in_path_survives_masking():
@@ -174,10 +211,10 @@ def _calls_from(graph: dict, src_label: str) -> list[tuple[str, str]]:
     return out
 
 
-def test_proven_inherited_call_drops_the_shared_pass_guess(tmp_path):
+def test_inherited_call_binds_the_ancestor_not_a_nearer_same_named_method(tmp_path):
     # TChildLaad inherits Laad from sub/BaseLaadB.pas; an unrelated TBaseLaadA.Laad
-    # sits next to the caller. Case folding lets the by-name pass guess the
-    # nearer one first; once the inherits walk proves BaseLaadB, the guess must go.
+    # sits next to the caller. Only the ancestor is in scope, so it is the one
+    # and only edge, never the nearer same-named method.
     graph = extract(
         [AMBIGUOUS / "BaseLaadA.pas", AMBIGUOUS / "sub" / "BaseLaadB.pas", AMBIGUOUS / "ChildLaad.pas"],
         cache_root=tmp_path, parallel=False,
@@ -186,10 +223,13 @@ def test_proven_inherited_call_drops_the_shared_pass_guess(tmp_path):
 
 
 @pytest.mark.parametrize("extractor", _extractors())
-def test_qualified_call_is_marked_as_member_call(extractor):
+def test_qualified_call_keeps_its_qualifier(extractor):
+    # `Query.Refresh` with a local `Query`: the qualifier is kept, and because
+    # the receiver is a local of the caller it is marked as a member call, so
+    # the resolver never binds it to a global or type of the same name.
     r = extractor(MEMBER / "MemberForm.pas")
-    rc = [c for c in r.get("raw_calls", []) if c.get("callee") == "refresh"]
-    assert rc and all(c.get("is_member_call") for c in rc)
+    rc = [c for c in r.get("raw_calls", []) if str(c.get("callee")).lower() == "refresh"]
+    assert rc and all(c.get("qualifier") and c.get("is_member_call") for c in rc)
 
 
 def test_member_call_on_unknown_object_does_not_bind_across_units(tmp_path):

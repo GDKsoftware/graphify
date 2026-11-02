@@ -1,0 +1,65 @@
+{
+  "delphi_version": "test",
+  "generator_version": "1",
+  "generated_at": "2026-11-02T00:00:00Z",
+  "units": {
+    "System": {
+      "interface_uses": [],
+      "types": {
+        "TObject": {
+          "kind": "class",
+          "ancestor": null,
+          "members": {
+            "Free": [{"vis": "public", "kind": "method", "params": 0}]
+          }
+        }
+      },
+      "routines": {
+        "IntToStr": [{"params": 1}],
+        "UpperCase": [{"params": 1}]
+      }
+    },
+    "Vcl.Dialogs": {
+      "interface_uses": ["System"],
+      "routines": {
+        "ShowMessage": [{"params": 1}],
+        "MessageDlg": [{"params": 4}]
+      }
+    },
+    "Vcl.Forms": {
+      "interface_uses": ["System"],
+      "types": {
+        "TForm": {"kind": "class", "ancestor": "TCustomForm", "members": {}},
+        "TCustomForm": {
+          "kind": "class",
+          "ancestor": "TScrollingWinControl",
+          "members": {
+            "Close": [{"vis": "public", "kind": "method", "params": 0}]
+          }
+        },
+        "TScrollingWinControl": {"kind": "class", "ancestor": "TObject", "members": {}},
+        "TDataModule": {"kind": "class", "ancestor": "TObject", "members": {}},
+        "TApplication": {
+          "kind": "class",
+          "ancestor": "TObject",
+          "members": {
+            "ProcessMessages": [{"vis": "public", "kind": "method", "params": 0}]
+          }
+        }
+      },
+      "globals": {"Application": "TApplication"}
+    },
+    "Vcl.StdCtrls": {
+      "interface_uses": ["System"],
+      "types": {
+        "TButton": {
+          "kind": "class",
+          "ancestor": "TObject",
+          "members": {
+            "Click": [{"vis": "public", "kind": "method", "params": 0}]
+          }
+        }
+      }
+    }
+  }
+}

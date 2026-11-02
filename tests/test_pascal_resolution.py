@@ -34,7 +34,7 @@ DERIVED = FIXTURES / "DerivedGadget.pas"
 
 def _find_raw_call(result: dict, callee: str) -> dict | None:
     for rc in result.get("raw_calls", []):
-        if rc.get("callee") == callee:
+        if str(rc.get("callee", "")).lower() == callee:
             return rc
     return None
 
@@ -54,15 +54,15 @@ def _call_edge(graph: dict, src_label: str, tgt_label: str):
 
 
 def test_single_file_extraction_reports_unresolved_inherited_call():
-    """Sanity check for the gap this resolver closes: the per-file extractor
-    alone cannot see BaseGadget.pas while extracting DerivedGadget.pas, so it
-    must NOT emit a `calls` edge for Run -> Prepare, and must report it via
-    raw_calls instead of silently dropping it."""
+    """The per-file extractor binds no calls: Run -> Prepare is reported as a
+    raw call with what the scope resolver needs (callee, enclosing routines)."""
     r = extract_pascal(DERIVED)
     assert _call_edge(r, "Run()", "Prepare()") is None
     rc = _find_raw_call(r, "prepare")
     assert rc is not None
     assert rc["caller_nid"]
+    assert rc["callee"] == "Prepare"
+    assert rc["enclosing_routines"] == ["TDerivedGadget.Run"]
 
 
 def test_calls_resolve_across_files_via_inherits_chain(tmp_path):
@@ -92,4 +92,4 @@ def test_cross_file_calls_do_not_cross_unrelated_classes(tmp_path):
 def test_pascal_resolver_registered():
     from graphify.resolver_registry import registered_resolvers
     names = {r.name for r in registered_resolvers()}
-    assert "pascal_inherited_calls" in names
+    assert "pascal_scope" in names

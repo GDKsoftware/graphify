@@ -27,8 +27,10 @@ typos from silently disabling classification.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 RC_FILENAME = ".graphifyrc"
@@ -109,11 +111,15 @@ def parse_language_value(value: str) -> str:
         ) from None
 
 
+_PASCAL_KEYS = ("pascal.dproj", "pascal.delphi_version", "pascal.delphi_symbols")
+
+
 def load_graphifyrc(root: Path) -> dict:
     """Parse ``<root>/.graphifyrc``. Returns ``{}`` when absent.
 
     Returned keys: ``viz_node_limit`` (int) and ``languages``
-    (``{".inc": ".php", ...}``) — each present only when the file sets it.
+    (``{".inc": ".php", ...}``) — each present only when the file sets it —
+    and ``pascal`` (``{"dproj": ..., "delphi_version": ..., "delphi_symbols": ...}``).
     Unknown keys are ignored so a newer graphify's options do not break an
     older one. Malformed lines raise ``ValueError`` naming the line.
     """
@@ -123,6 +129,7 @@ def load_graphifyrc(root: Path) -> dict:
 
     cfg: dict = {}
     languages: dict[str, str] = {}
+    pascal: dict[str, str] = {}
     # utf-8-sig: Windows PowerShell 5.1 (`Set-Content -Encoding UTF8`) and older
     # Notepad save UTF-8 with a BOM. Read as plain utf-8, the BOM became part of
     # the first key, which then matched nothing and was ignored without a word.
@@ -161,8 +168,14 @@ def load_graphifyrc(root: Path) -> dict:
                     f"Invalid {key} in {rc_path} at line {line_num}: {exc}"
                 ) from None
             languages[_normalise_ext(ext_part)] = target
+        elif key in _PASCAL_KEYS:
+            if not val:
+                raise ValueError(f"Invalid {key} in {rc_path} at line {line_num}: empty value")
+            pascal[key[len("pascal."):]] = val
     if languages:
         cfg["languages"] = languages
+    if pascal:
+        cfg["pascal"] = pascal
     return cfg
 
 
@@ -192,6 +205,29 @@ def _active() -> dict[str, str]:
         got = {}
         _local.active = got
     return got
+
+
+@dataclass(frozen=True)
+class PascalSettings:
+    """The ``pascal.*`` keys of the active ``.graphifyrc``.
+
+    ``root`` is the directory of that file; relative paths in the other fields
+    are relative to it.
+    """
+
+    root: Path | None = None
+    dproj: str | None = None
+    delphi_version: str | None = None
+    delphi_symbols: str | None = None
+
+
+def set_pascal_settings(settings: PascalSettings | None) -> None:
+    """Replace this thread's Pascal settings (``None`` clears them)."""
+    _local.pascal = settings or PascalSettings()
+
+
+def get_pascal_settings() -> PascalSettings:
+    return getattr(_local, "pascal", None) or PascalSettings()
 
 
 def set_language_overrides(mapping: dict[str, str] | None) -> None:
@@ -224,6 +260,13 @@ def activate_language_overrides(root: Path) -> dict[str, str]:
             print(f"[graphify] warning: ignoring {RC_FILENAME}: {exc}", file=sys.stderr)
         cfg = {}
     set_language_overrides(cfg.get("languages"))
+    pascal = cfg.get("pascal") or {}
+    set_pascal_settings(PascalSettings(
+        root=Path(root),
+        dproj=pascal.get("dproj"),
+        delphi_version=pascal.get("delphi_version"),
+        delphi_symbols=pascal.get("delphi_symbols"),
+    ))
     return get_language_overrides()
 
 
@@ -241,15 +284,27 @@ def effective_suffix(path: Path | str) -> str:
     return active.get(suffix.lower(), suffix)
 
 
+_PASCAL_SUFFIXES = frozenset({".pas", ".dpr", ".dpk", ".lpr", ".pp"})
+
+
 def cache_salt(path: Path | str) -> str | None:
-    """Extra cache-key material for a remapped file, else ``None``.
+    """Extra cache-key material for a file whose parse depends on settings.
 
     An AST cache entry is keyed by content, and the same bytes parse to a
     different graph under a different extractor — so a ``.inc`` cached as
-    Pascal must not be served once the project declares it PHP.
+    Pascal must not be served once the project declares it PHP. A Pascal
+    file also parses differently when ``{$I}`` files are found through the
+    ``.dproj`` unit search path, so that path is part of its key.
     """
-    active = _active()
-    if not active:
-        return None
-    target = active.get(Path(path).suffix.lower())
-    return f"language={target}" if target else None
+    suffix = Path(path).suffix.lower()
+    target = _active().get(suffix)
+    parts = [f"language={target}"] if target else []
+    if (target or suffix) in _PASCAL_SUFFIXES:
+        from graphify.pascal_dproj import active_dproj
+
+        info = active_dproj()
+        if info is not None and info.search_path:
+            joined = "|".join(str(d) for d in info.search_path)
+            digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()
+            parts.append(f"pascal_dirs={digest}")
+    return ";".join(parts) if parts else None
