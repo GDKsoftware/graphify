@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import re
 from graphify.extractors.base import _file_stem, _make_id, _read_source_bytes, _read_source_text
+from graphify.extractors.pascal_calls import count_args, make_raw_call, split_callee
 from graphify.extractors.resolution import _pascal_resolve_class, _pascal_resolve_unit
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,17 +55,42 @@ _PAS_IMPL_HEADER_RE = re.compile(
     r"\b(?:procedure|function|constructor|destructor|operator)\s+"
     r"(?P<qual>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)"
     r"(?:\s*<[^>]+>)?"
-    r"(?:\s*\([^)]*\))?"
+    r"(?:\s*\((?P<params>[^)]*)\))?"
     r"(?:\s*:\s*[\w<>,\s.]+)?"
     r"\s*;",
     re.IGNORECASE,
 )
 
+# Directive after a header that means the routine has no body here.
+_PAS_NO_BODY_RE = re.compile(
+    r"\s*(?:[a-z]+\s*;\s*)*?(?:forward|external)\b", re.IGNORECASE
+)
+_PAS_BEGIN_RE = re.compile(r"\bbegin\b", re.IGNORECASE)
+_PAS_DECL_SECTION_RE = re.compile(
+    r"\b(?:var|const)\b(.*?)(?=\b(?:var|const|type|label|procedure|function|"
+    r"constructor|destructor|operator|threadvar|resourcestring)\b|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_PAS_DECL_NAMES_RE = re.compile(r"\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*[:=]")
+_PAS_PARAM_MODIFIER_RE = re.compile(r"\b(?:var|const|out|constref)\b", re.IGNORECASE)
+
 _PAS_BEGIN_END_TOKEN_RE = re.compile(
     r"\b(begin|end|case|try|asm|record)\b", re.IGNORECASE
 )
 
-_PAS_CALL_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[(;]")
+# A call site: bare `inherited`, `inherited Name`, or a (qualified) name whose
+# receiver may be an expression (`Items[0].Refresh`, `GetX().Foo`, `p^.Foo`),
+# followed by `(` or `;`.
+_PAS_CALL_RE = re.compile(
+    r"(?<![\w.])(?:"
+    r"(?P<bare>inherited)(?=\s*(?:;|\bend\b|\belse\b|\buntil\b))"
+    r"|(?:(?P<inh>inherited)\s+)?"
+    r"(?P<callee>[A-Za-z_]\w*"
+    r"(?:\s*(?:\[[^\]]*\]|\([^()]*\)|\^)*\s*\.\s*[A-Za-z_]\w*)*)"
+    r"\s*(?P<open>[(;])"
+    r")",
+    re.IGNORECASE,
+)
 
 _PAS_KEYWORDS = frozenset({
     "begin", "end", "if", "then", "else", "while", "do", "for", "to",
@@ -181,6 +208,101 @@ def _pascal_find_body(text: str, start: int) -> tuple[int, int]:
             if depth == 0:
                 return (body_start, tok.start())
     return (body_start, len(text))
+
+@dataclass
+class _PascalRoutine:
+    """A routine found in the implementation section, nested ones included."""
+    qualified: str
+    name: str
+    header_start: int
+    header_end: int
+    params: str
+    parent: "_PascalRoutine | None" = None
+    decl_end: int = 0
+    body_start: int = 0
+    body_end: int = 0
+    end_pos: int = 0
+    children: list["_PascalRoutine"] = field(default_factory=list)
+
+
+def _pascal_scan_routine(text: str, hm: re.Match, parent: _PascalRoutine | None) -> _PascalRoutine:
+    name = hm.group("qual")
+    qualified = f"{parent.qualified}.{name}" if parent else name
+    r = _PascalRoutine(qualified, name, hm.start(), hm.end(), hm.group("params") or "", parent)
+    cur = hm.end()
+    r.end_pos = cur
+    if _PAS_NO_BODY_RE.match(text, cur):
+        return r
+    while True:
+        nh = _PAS_IMPL_HEADER_RE.search(text, cur)
+        bm = _PAS_BEGIN_RE.search(text, cur)
+        header_first = nh is not None and (bm is None or nh.start() < bm.start())
+        # A qualified header (`TFoo.Bar`) is never nested: this one has no body.
+        if header_first and "." in nh.group("qual"):
+            return r
+        if header_first:
+            child = _pascal_scan_routine(text, nh, r)
+            r.children.append(child)
+            cur = r.end_pos = child.end_pos
+            continue
+        if bm:
+            r.decl_end = bm.start()
+            r.body_start, r.body_end = _pascal_find_body(text, cur)
+            r.end_pos = r.body_end
+        return r
+
+
+def _pascal_scan_routines(text: str) -> list[_PascalRoutine]:
+    """Top-level routines of ``text``; nested routines hang off ``children``."""
+    routines: list[_PascalRoutine] = []
+    cur = 0
+    while True:
+        hm = _PAS_IMPL_HEADER_RE.search(text, cur)
+        if not hm:
+            return routines
+        r = _pascal_scan_routine(text, hm, None)
+        routines.append(r)
+        cur = max(r.end_pos, hm.end())
+
+
+def _pascal_local_names(text: str, r: _PascalRoutine) -> set[str]:
+    """Lowercase parameter and local `var`/`const` names declared by ``r``.
+
+    Declarations that sit inside a nested routine belong to that routine.
+    """
+    names: set[str] = set()
+    for param in r.params.split(";"):
+        head, colon, _type = param.partition(":")
+        if colon:
+            cleaned = _PAS_PARAM_MODIFIER_RE.sub(" ", head)
+            names.update(n.strip().lower() for n in cleaned.split(",") if n.strip())
+    if r.body_start:
+        decl = list(text[r.header_end:r.decl_end])
+        for child in r.children:
+            for i in range(child.header_start - r.header_end, child.end_pos - r.header_end):
+                if 0 <= i < len(decl):
+                    decl[i] = " "
+        for section in _PAS_DECL_SECTION_RE.finditer("".join(decl)):
+            for stmt in section.group(1).split(";"):
+                m = _PAS_DECL_NAMES_RE.match(stmt)
+                if m:
+                    names.update(n.strip().lower() for n in m.group(1).split(","))
+    return names
+
+
+def _pascal_call_args(body_text: str, open_pos: int) -> tuple[str, bool]:
+    """Text between the balanced `(`...`)` at ``open_pos`` and whether it closed."""
+    depth = 0
+    for i in range(open_pos, len(body_text)):
+        ch = body_text[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+            if depth == 0:
+                return body_text[open_pos + 1:i], True
+    return body_text[open_pos + 1:], False
+
 
 def _resolve_pascal_callee_factory(
     records: list[tuple],
@@ -394,33 +516,49 @@ def _extract_pascal_regex(path: Path) -> dict:
 
         pos = end_m.end() if end_m else len(search_text)
 
-    # Implementation headers (procedure/function/constructor/destructor)
+    # Implementation headers (procedure/function/constructor/destructor),
+    # nested routines included.
     impl_records: list[tuple[str, int, str, str, str]] = []
     # (proc_nid, line, body_text, container, name_lower)
-    for fm in _PAS_IMPL_HEADER_RE.finditer(impl_text):
-        qualified = fm.group("qual")
-        line = _lineno(stripped, impl_off + fm.start())
-        if "." in qualified:
-            cls_part, method_part = qualified.split(".", 1)
+    # proc_nid -> (qualified names from the routine outwards, names that shadow
+    # a call, source-case routine name)
+    impl_scope: dict[str, tuple[list[str], set[str], str]] = {}
+
+    def _add_routine(r: _PascalRoutine, parent_nid: str | None, shadow: set[str]) -> None:
+        line = _lineno(stripped, impl_off + r.header_start)
+        if parent_nid is not None:
+            container, relation = parent_nid, "contains"
+            label, name_lower, method_name = f"{r.name}()", r.name.lower(), r.name
+        elif "." in r.qualified:
+            cls_part, method_part = r.qualified.split(".", 1)
             cls_nid = _make_id(stem, cls_part)
             container = cls_nid if cls_nid in seen_ids else module_nid
             relation = "method" if cls_nid in seen_ids else "contains"
-            label = f"{method_part}()"
-            name_lower = method_part.lower()
+            label, name_lower, method_name = f"{method_part}()", method_part.lower(), method_part
         else:
             container, relation = module_nid, "contains"
-            label = f"{qualified}()"
-            name_lower = qualified.lower()
-        proc_nid = _make_id(stem, qualified)
+            label, name_lower, method_name = f"{r.qualified}()", r.qualified.lower(), r.qualified
+        proc_nid = _make_id(stem, r.qualified)
         _add_node(proc_nid, label, line)
         _add_edge(container, proc_nid, relation, line)
 
-        body_start, body_end = _pascal_find_body(impl_text, fm.end())
-        body_text = impl_text[body_start:body_end] if body_start else ""
+        body_text = impl_text[r.body_start:r.body_end] if r.body_start else ""
         # Count call lines from where the body starts, not from the header:
         # `var`/`const` sections between them would otherwise shift every call.
-        body_line = _lineno(stripped, impl_off + body_start) if body_start else line
+        body_line = _lineno(stripped, impl_off + r.body_start) if r.body_start else line
         impl_records.append((proc_nid, body_line, body_text, container, name_lower))
+        shadow = shadow | _pascal_local_names(impl_text, r)
+        chain: list[str] = []
+        outer: _PascalRoutine | None = r
+        while outer is not None:
+            chain.append(outer.qualified)
+            outer = outer.parent
+        impl_scope[proc_nid] = (chain, shadow, method_name)
+        for child in r.children:
+            _add_routine(child, proc_nid, shadow)
+
+    for routine in _pascal_scan_routines(impl_text):
+        _add_routine(routine, None, set())
 
     # Intra-file call edges, scoped by the caller's own class, then its
     # ancestor chain (via `inherits` edges already emitted above), then
@@ -432,12 +570,36 @@ def _extract_pascal_regex(path: Path) -> dict:
     callee_nid = _resolve_pascal_callee_factory(impl_records, edges, module_nid)
     raw_calls: list[dict] = []
     for caller_nid, body_line, body_text, _container, _name_lower in impl_records:
+        chain, shadow, method_name = impl_scope[caller_nid]
         for cm in _PAS_CALL_RE.finditer(body_text):
-            callee_name = cm.group(1).split(".")[-1].lower()
-            if callee_name in _PAS_KEYWORDS:
-                continue
             call_line = body_line + body_text.count("\n", 0, cm.start())
-            target_nid = callee_nid(caller_nid, callee_name)
+            arg_count: int | None = 0
+            if cm.group("open") == "(":
+                arg_text, closed = _pascal_call_args(body_text, cm.end() - 1)
+                arg_count = count_args(arg_text) if closed else None
+            if cm.group("bare"):
+                qualifier, callee_name = "inherited", method_name
+            else:
+                qualifier, callee_name = split_callee(cm.group("callee"))
+                if cm.group("inh") and qualifier is None:
+                    qualifier = "inherited"
+            if qualifier == "inherited":
+                # Never the caller's own class: skip the per-file resolver, the
+                # cross-file pass walks the ancestors.
+                raw_calls.append(make_raw_call(
+                    source_file=str_path, line=call_line, caller_nid=caller_nid,
+                    callee=callee_name, qualifier=qualifier, arg_count=arg_count,
+                    enclosing_routines=chain,
+                ))
+                continue
+            name_lower = callee_name.lower()
+            if name_lower in _PAS_KEYWORDS:
+                continue
+            # A parameter or local of the caller (or an enclosing routine) is
+            # not a routine call.
+            if qualifier is None and name_lower in shadow:
+                continue
+            target_nid = callee_nid(caller_nid, name_lower)
             if target_nid == caller_nid:
                 continue
             if not target_nid:
@@ -445,13 +607,11 @@ def _extract_pascal_regex(path: Path) -> dict:
                 # class declared in another file) -- report for the
                 # cross-file resolver (graphify.pascal_resolution) instead of
                 # guessing or dropping it silently.
-                raw_calls.append({
-                    "source_file": str_path,
-                    "source_location": f"L{call_line}",
-                    "caller_nid": caller_nid,
-                    "callee": callee_name,
-                    "is_member_call": _pascal_is_member_call(cm.group(1)),
-                })
+                raw_calls.append(make_raw_call(
+                    source_file=str_path, line=call_line, caller_nid=caller_nid,
+                    callee=callee_name, qualifier=qualifier, arg_count=arg_count,
+                    enclosing_routines=chain,
+                ))
                 continue
             pair = (caller_nid, target_nid)
             if pair in seen_call_pairs:

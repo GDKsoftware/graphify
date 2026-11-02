@@ -124,9 +124,10 @@ def resolve_pascal_inherited_calls(
 
     for rc in _pascal_raw_calls(per_file):
         caller = rc.get("caller_nid")
-        name_lower = rc.get("callee")
-        if not caller or not name_lower:
+        callee = rc.get("callee")
+        if not caller or not callee:
             continue
+        name_lower = str(callee).lower()
         # `Query.Refresh` is a call on some other object: the caller's own
         # ancestor chain says nothing about its target.
         if rc.get("is_member_call"):

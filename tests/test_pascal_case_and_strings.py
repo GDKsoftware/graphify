@@ -188,7 +188,7 @@ def test_proven_inherited_call_drops_the_shared_pass_guess(tmp_path):
 @pytest.mark.parametrize("extractor", _extractors())
 def test_qualified_call_is_marked_as_member_call(extractor):
     r = extractor(MEMBER / "MemberForm.pas")
-    rc = [c for c in r.get("raw_calls", []) if c.get("callee") == "refresh"]
+    rc = [c for c in r.get("raw_calls", []) if str(c.get("callee")).lower() == "refresh"]
     assert rc and all(c.get("is_member_call") for c in rc)
 
 

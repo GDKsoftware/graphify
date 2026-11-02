@@ -1,0 +1,127 @@
+"""Raw calls reported by the Pascal extractors: qualifier, argument count and
+enclosing routines, plus the shared call-site helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from graphify.extractors.pascal_calls import (
+    count_args,
+    is_expression_receiver,
+    make_raw_call,
+    split_callee,
+)
+
+CALLS = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Calls.pas"
+
+
+def _extractors(*, tree_sitter_ready: bool = False):
+    from graphify.extract import _extract_pascal_regex, extract_pascal
+
+    marks = [] if tree_sitter_ready else [
+        pytest.mark.xfail(strict=True, reason="tree-sitter: Task 2")
+    ]
+    return [
+        pytest.param(extract_pascal, id="tree-sitter", marks=marks),
+        pytest.param(_extract_pascal_regex, id="regex"),
+    ]
+
+
+def _rc(result: dict, callee: str) -> dict | None:
+    for rc in result.get("raw_calls", []):
+        if rc["callee"].lower() == callee.lower():
+            return rc
+    return None
+
+
+def _labels(nodes: list[dict]) -> dict[str, str]:
+    return {n["id"]: n["label"] for n in nodes}
+
+
+def test_split_callee():
+    assert split_callee("Vcl.Dialogs.ShowMessage") == ("Vcl.Dialogs", "ShowMessage")
+    assert split_callee("a[i] . Foo") == ("a[i]", "Foo")
+    assert split_callee("Foo") == (None, "Foo")
+
+
+def test_is_expression_receiver():
+    assert is_expression_receiver("a[i]") and is_expression_receiver("GetX()")
+    assert is_expression_receiver("p^")
+    assert not is_expression_receiver("Vcl.Dialogs") and not is_expression_receiver(None)
+
+
+def test_count_args():
+    assert count_args(None) == 0 and count_args("") == 0
+    assert count_args("f(1, 2), 3") == 2
+    assert count_args("A, (B + C), [1, 2]") == 3
+    assert count_args("f(1") is None
+
+
+def test_make_raw_call_schema():
+    rc = make_raw_call(
+        source_file="x.pas", line=7, caller_nid="n", callee="Foo", qualifier="Self",
+        arg_count=1, enclosing_routines=["TA.B"],
+    )
+    assert rc == {
+        "language": "pascal", "source_file": "x.pas", "source_location": "L7",
+        "caller_nid": "n", "callee": "Foo", "qualifier": "Self",
+        "is_member_call": False, "arg_count": 1, "enclosing_routines": ["TA.B"],
+    }
+    unit_call = make_raw_call(
+        source_file="x.pas", line=1, caller_nid="n", callee="Foo", qualifier="Unit1",
+        arg_count=0, enclosing_routines=[],
+    )
+    assert unit_call["is_member_call"] is True
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_qualified_call_keeps_qualifier(extractor):
+    rc = _rc(extractor(CALLS), "ShowMessage")
+    assert rc["qualifier"] == "Vcl.Dialogs" and rc["language"] == "pascal"
+    assert rc["arg_count"] == 1
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_callee_keeps_source_case(extractor):
+    assert _rc(extractor(CALLS), "ShowMessage")["callee"] == "ShowMessage"
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_arg_count_counts_top_level_only(extractor):
+    assert _rc(extractor(CALLS), "Bereken")["arg_count"] == 3
+    assert _rc(extractor(CALLS), "Leeg")["arg_count"] == 0
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_nested_routine_has_node_and_enclosing_chain(extractor):
+    r = extractor(CALLS)
+    assert "Inner()" in _labels(r["nodes"]).values()
+    assert _rc(r, "InitCap")["enclosing_routines"] == ["TFoo.Q.Inner", "TFoo.Q"]
+
+
+# The tree-sitter pass already reports no raw call for `Lokaal`.
+@pytest.mark.parametrize("extractor", _extractors(tree_sitter_ready=True))
+def test_local_variable_shadows_call(extractor):
+    assert _rc(extractor(CALLS), "Lokaal") is None
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_inherited_call_is_marked(extractor):
+    r = extractor(CALLS)
+    assert any(c["qualifier"] == "inherited" and c["callee"].lower() == "q"
+               for c in r["raw_calls"])
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_bare_inherited_names_current_method(extractor):
+    r = extractor(CALLS)
+    inherited = [c for c in r["raw_calls"] if c["qualifier"] == "inherited"]
+    assert len(inherited) == 2
+    assert all(c["is_member_call"] is False for c in inherited)
+
+
+@pytest.mark.parametrize("extractor", _extractors())
+def test_expression_receiver_is_member_call(extractor):
+    assert _rc(extractor(CALLS), "Refresh")["is_member_call"] is True
