@@ -34,7 +34,7 @@ DERIVED = FIXTURES / "DerivedGadget.pas"
 
 def _find_raw_call(result: dict, callee: str) -> dict | None:
     for rc in result.get("raw_calls", []):
-        if rc.get("callee") == callee:
+        if str(rc.get("callee", "")).lower() == callee:
             return rc
     return None
 

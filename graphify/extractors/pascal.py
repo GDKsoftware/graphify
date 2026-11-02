@@ -727,6 +727,66 @@ def extract_pascal(path: Path) -> dict:
                 return _read(child)
         return None
 
+    # proc_nid -> (qualified names from the routine outwards, lowercase names of
+    # parameters and locals that shadow a call, source-case outermost method name)
+    proc_scope: dict[str, tuple[list[str], set[str], str]] = {}
+
+    def _named(node) -> list:  # type: ignore[no-untyped-def]
+        return [c for c in node.children if c.is_named and c.type != "comment"]
+
+    def _local_names(node, header) -> set[str]:  # type: ignore[no-untyped-def]
+        """Lowercase parameter, local `var` and `const` names declared by a routine."""
+        names: set[str] = set()
+        for args in header.children:
+            if args.type == "declArgs":
+                for arg in args.children:
+                    names.update(
+                        _read(i).lower() for i in arg.children if i.type == "identifier"
+                    )
+        for section in node.children:
+            if section.type in ("declVars", "declConsts"):
+                for decl in section.children:
+                    names.update(
+                        _read(i).lower() for i in decl.children if i.type == "identifier"
+                    )
+        return names
+
+    def add_routine(node, parent_nid: str, outer) -> None:  # type: ignore[no-untyped-def]
+        # outer: None for a top-level routine, else the enclosing routine's
+        # (qualified, nid, shadow, outermost method name, chain).
+        line = node.start_point[0] + 1
+        header = next((c for c in node.children if c.type == "declProc"), None)
+        name = _proc_name(header) if header else None
+        if not header or not name:
+            for child in node.children:
+                walk(child, parent_nid)
+            return
+        body_node = next((c for c in node.children if c.type == "block"), None)
+        container, relation = parent_nid, "contains"
+        label = method_name = name
+        if outer is not None:
+            qualified = f"{outer[0]}.{name}"
+            method_name = outer[3]
+        else:
+            qualified = name
+            if "." in name:
+                parts = name.split(".", 1)
+                cls_nid = _make_id(stem, parts[0])
+                if cls_nid in seen_ids:
+                    container, relation = cls_nid, "method"
+                label = method_name = parts[-1]
+        proc_nid = _make_id(stem, qualified)
+        add_node(proc_nid, f"{label}()", line)
+        add_edge(container, proc_nid, relation, line)
+        shadow = (outer[2] if outer else set()) | _local_names(node, header)
+        chain = [qualified] + (outer[4] if outer else [])
+        proc_scope[proc_nid] = (chain, shadow, method_name)
+        if body_node:
+            proc_bodies.append((proc_nid, body_node, container, label.lower()))
+        for child in node.children:
+            if child.type == "defProc":
+                add_routine(child, proc_nid, (qualified, proc_nid, shadow, method_name, chain))
+
     def walk(node, parent_nid: str) -> None:  # type: ignore[no-untyped-def]
         nonlocal module_nid
         t = node.type
@@ -835,36 +895,18 @@ def extract_pascal(path: Path) -> dict:
                     add_edge(parent_nid, method_nid, "method", line)
             return
 
+        if t == "declProc" and node.parent is not None and node.parent.type == "implementation":
+            # A routine without a body here (`external`, `forward`): it still
+            # gets a node, and the routines after it stay top-level.
+            name = _proc_name(node)
+            if name and "." not in name:
+                proc_nid = _make_id(stem, name)
+                add_node(proc_nid, f"{name}()", line)
+                add_edge(parent_nid, proc_nid, "contains", line)
+            return
+
         if t == "defProc":
-            header = next((c for c in node.children if c.type == "declProc"), None)
-            body_node = next((c for c in node.children if c.type == "block"), None)
-            if not header:
-                for child in node.children:
-                    walk(child, parent_nid)
-                return
-            name = _proc_name(header)
-            if not name:
-                for child in node.children:
-                    walk(child, parent_nid)
-                return
-            container = parent_nid
-            if "." in name:
-                parts = name.split(".", 1)
-                cls_nid = _make_id(stem, parts[0])
-                if cls_nid in seen_ids:
-                    container = cls_nid
-                label = f"{parts[-1]}()"
-            else:
-                label = f"{name}()"
-            proc_nid = _make_id(stem, name)
-            add_node(proc_nid, label, line)
-            add_edge(
-                container, proc_nid,
-                "method" if container != parent_nid else "contains",
-                line,
-            )
-            if body_node:
-                proc_bodies.append((proc_nid, body_node, container, label.removesuffix("()").lower()))
+            add_routine(node, parent_nid, None)
             return
 
         for child in node.children:
@@ -880,7 +922,28 @@ def extract_pascal(path: Path) -> dict:
     seen_call_pairs: set[tuple[str, str]] = set()
     raw_calls: list[dict] = []
 
-    def _emit_or_report(caller_nid: str, name_lower: str, line: int, member: bool = False) -> None:
+    def _report(
+        caller_nid: str, line: int, callee: str, qualifier: str | None, arg_count: int | None,
+    ) -> None:
+        raw_calls.append(make_raw_call(
+            source_file=str_path, line=line, caller_nid=caller_nid, callee=callee,
+            qualifier=qualifier, arg_count=arg_count,
+            enclosing_routines=proc_scope[caller_nid][0],
+        ))
+
+    def _emit_or_report(
+        caller_nid: str, callee: str, qualifier: str | None, line: int, arg_count: int | None,
+    ) -> None:
+        if qualifier == "inherited":
+            # Never the caller's own class: skip the per-file resolver, the
+            # cross-file pass walks the ancestors.
+            _report(caller_nid, line, callee, qualifier, arg_count)
+            return
+        name_lower = callee.lower()
+        # A parameter or local of the caller (or an enclosing routine) is not
+        # a routine call.
+        if qualifier is None and name_lower in proc_scope[caller_nid][1]:
+            return
         target = resolve_callee(caller_nid, name_lower)
         if target == caller_nid:
             return
@@ -889,38 +952,54 @@ def extract_pascal(path: Path) -> dict:
             # class declared in another file) -- report for the cross-file
             # resolver (graphify.pascal_resolution) instead of guessing or
             # dropping it silently.
-            raw_calls.append({
-                "source_file": str_path,
-                "source_location": f"L{line}",
-                "caller_nid": caller_nid,
-                "callee": name_lower,
-                "is_member_call": member,
-            })
+            _report(caller_nid, line, callee, qualifier, arg_count)
             return
         pair = (caller_nid, target)
         if pair not in seen_call_pairs:
             seen_call_pairs.add(pair)
             add_edge(caller_nid, target, "calls", line, context="call")
 
+    def _call_site(
+        caller_nid: str, callee_text: str, line: int, arg_count: int | None,
+    ) -> None:
+        qualifier, callee = split_callee(callee_text)
+        callee = re.sub(r"<.*$", "", callee).strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", callee):
+            _emit_or_report(caller_nid, callee, qualifier, line, arg_count)
+
+    def _inherited_site(caller_nid: str, node, line: int, arg_count: int | None) -> None:  # type: ignore[no-untyped-def]
+        # `inherited Foo` names the method; a bare `inherited` repeats the name
+        # of the current (outermost enclosing) method.
+        ident = next((c for c in node.children if c.type == "identifier"), None)
+        callee = _read(ident) if ident else proc_scope[caller_nid][2]
+        _emit_or_report(caller_nid, callee, "inherited", line, arg_count)
+
     def walk_calls(node, caller_nid: str) -> None:  # type: ignore[no-untyped-def]
+        if node.type == "defProc":
+            return  # a nested routine is its own caller
+        line = node.start_point[0] + 1
         if node.type == "exprCall":
-            callee_text = None
-            for child in node.children:
-                if child.is_named and child.type not in ("exprArgs",):
-                    callee_text = _read(child)
-                    break
-            if callee_text:
-                _emit_or_report(
-                    caller_nid, callee_text.split(".")[-1].lower(), node.start_point[0] + 1,
-                    member=_pascal_is_member_call(callee_text),
-                )
+            named = _named(node)
+            callee_node = next((c for c in named if c.type != "exprArgs"), None)
+            args = next((c for c in named if c.type == "exprArgs"), None)
+            arg_count = len(_named(args)) if args is not None else 0
+            if callee_node is not None:
+                if callee_node.type == "inherited":
+                    _inherited_site(caller_nid, callee_node, line, arg_count)
+                else:
+                    _call_site(caller_nid, _read(callee_node), line, arg_count)
         elif node.type == "statement":
-            # Pascal bare procedure calls with no args: `Reset;`
-            # tree-sitter represents these as statement → identifier (no exprCall wrapper)
-            named = [c for c in node.children if c.is_named]
-            if len(named) == 1 and named[0].type == "identifier":
-                callee_text = _read(named[0])
-                _emit_or_report(caller_nid, callee_text.lower(), node.start_point[0] + 1)
+            # A call without parentheses: `Reset;`, `Unit1.Foo.Bar;`, `inherited;`.
+            # tree-sitter has no exprCall wrapper for these.
+            named = _named(node)
+            if len(named) == 1:
+                only = named[0]
+                if only.type == "identifier":
+                    _emit_or_report(caller_nid, _read(only), None, line, 0)
+                elif only.type == "exprDot":
+                    _call_site(caller_nid, _read(only), line, 0)
+                elif only.type == "inherited":
+                    _inherited_site(caller_nid, only, line, 0)
         for child in node.children:
             walk_calls(child, caller_nid)
 

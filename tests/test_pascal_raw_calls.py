@@ -20,14 +20,11 @@ NESTED = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Nested.pas"
 CALLS = Path(__file__).parent / "fixtures" / "pascal_raw_calls" / "Calls.pas"
 
 
-def _extractors(*, tree_sitter_ready: bool = False):
+def _extractors():
     from graphify.extract import _extract_pascal_regex, extract_pascal
 
-    marks = [] if tree_sitter_ready else [
-        pytest.mark.xfail(strict=True, reason="tree-sitter: Task 2")
-    ]
     return [
-        pytest.param(extract_pascal, id="tree-sitter", marks=marks),
+        pytest.param(extract_pascal, id="tree-sitter"),
         pytest.param(_extract_pascal_regex, id="regex"),
     ]
 
@@ -111,8 +108,7 @@ def test_nested_routine_has_node_and_enclosing_chain(extractor):
     assert _rc(r, "InitCap")["enclosing_routines"] == ["TFoo.Q.Inner", "TFoo.Q"]
 
 
-# The tree-sitter pass already reports no raw call for `Lokaal`.
-@pytest.mark.parametrize("extractor", _extractors(tree_sitter_ready=True))
+@pytest.mark.parametrize("extractor", _extractors())
 def test_local_variable_shadows_call(extractor):
     assert _rc(extractor(CALLS), "Lokaal") is None
 
