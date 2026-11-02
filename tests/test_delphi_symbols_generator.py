@@ -66,10 +66,19 @@ def test_package_data_includes_symbol_files() -> None:
     assert "data/delphi/*.symbols.json.gz" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 
-def test_example_directories_are_skipped() -> None:
-    dialogs = _gen()["units"]["Vcl.Dialogs"]
-    assert "ExampleOnly" not in dialogs["routines"]
-    assert "ShowMessage" in dialogs["routines"]
+def test_example_and_test_directories_are_skipped() -> None:
+    units = _gen()["units"]
+    for name in ("ExampleOnly", "DUnitOnly", "TestOnly"):
+        assert name not in units
+    # examples/Collide.pas is shallower than the RTL file and would win by depth
+    assert list(units["Collide"]["routines"]) == ["FromRtl"]
+    assert "ShowMessage" in units["Vcl.Dialogs"]["routines"]
+
+
+def test_unit_header_accepts_hint_directives() -> None:
+    units = _gen()["units"]
+    assert "HintProc" in units["Hint"]["routines"]
+    assert "Hint2Proc" in units["Hint2"]["routines"]
 
 
 def test_duplicate_unit_prefers_the_shallowest_file() -> None:

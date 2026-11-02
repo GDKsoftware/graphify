@@ -35,7 +35,10 @@ _SKIP_DIR_NAMES = frozenset({
 })
 _SKIP_TOP_TREES = frozenset({"dunit", "dunitx"})
 _COMMENT_RE = re.compile(r"\{[^}]*\}|\(\*.*?\*\)|//[^\n]*", re.DOTALL)
-_UNIT_HEADER_RE = re.compile(r"^\s*unit\s+([A-Za-z_][\w.]*)\s*[;(]", re.IGNORECASE | re.MULTILINE)
+_HINT = r"(?:platform|library|experimental|deprecated(?:\s*'(?:[^']|'')*')?)"
+_UNIT_HEADER_RE = re.compile(
+    rf"^\s*unit\s+([A-Za-z_][\w.]*)(?:\s+{_HINT})*\s*;", re.IGNORECASE | re.MULTILINE,
+)
 # Per-scan fields that mean nothing in a symbol file.
 _DROP_UNIT_KEYS = ("module_nid", "includes")
 
