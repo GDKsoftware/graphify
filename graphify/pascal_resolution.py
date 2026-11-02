@@ -575,7 +575,7 @@ def _canonical_imports(
     for e in all_edges:
         if e.get("relation") != "imports":
             continue
-        source, target = e.get("source"), e.get("target")
+        source, target = str(e.get("source") or ""), str(e.get("target") or "")
         hit = redirect.get((source, target))
         if hit is not None and not (by_id.get(target) or {}).get("source_file"):
             if target != hit[0]:
