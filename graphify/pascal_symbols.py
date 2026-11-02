@@ -317,10 +317,6 @@ class SymbolTable:
             return make_id(unit)
         return ""
 
-    def is_external_unit(self, unit: str) -> bool:
-        resolved = self.resolve_unit_name(unit)
-        return resolved is not None and not self._units[resolved.casefold()].scanned
-
     def unit_of_file(self, source_file: str) -> str | None:
         """Unit of a scanned file. An include file belongs to the unit that
         includes it; when several units include it, it has no unit."""

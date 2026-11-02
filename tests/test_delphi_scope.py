@@ -422,8 +422,7 @@ def test_global_from_symbol_file(vcl):
 def test_system_routine_without_uses(vcl):
     from graphify.ids import make_id
 
-    # The regex extractor treats `IntToStr` as a keyword and reports no call for it,
-    # so the rule is checked with `UpperCase`, which both extractors report.
+    # `IntToStr` and `UpperCase` are both System routines of the test symbol file.
     edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", make_id("System"))
     assert edge is not None
     assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.1/7")
@@ -445,3 +444,20 @@ def test_external_node_is_created_or_flagged():
         "id": "system", "label": "System", "file_type": "code", "source_file": "",
         "pascal_external": True,
     }
+
+
+def test_regex_and_tree_sitter_report_the_same_raw_calls(monkeypatch):
+    from graphify.extractors.pascal import extract_pascal
+
+    path = FIXTURES / "ParityRtl.pas"
+
+    def callees() -> list[tuple]:
+        result = extract_pascal(path)
+        return sorted((c["callee"], c.get("qualifier")) for c in result["raw_calls"])
+
+    tree_sitter = callees()
+    monkeypatch.setitem(sys.modules, "tree_sitter_pascal", None)
+    regex = callees()
+    assert regex == tree_sitter
+    names = {c for c, _ in regex}
+    assert {"IntToStr", "Format", "Free", "Create", "Assigned"} <= names

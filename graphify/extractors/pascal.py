@@ -98,18 +98,17 @@ _PAS_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Language words only. RTL routines and intrinsics (IntToStr, Format, Free, Create,
+# Assigned, Exit, ...) are reported as calls like the tree-sitter extractor does;
+# the scope resolver decides whether they bind.
 _PAS_KEYWORDS = frozenset({
     "begin", "end", "if", "then", "else", "while", "do", "for", "to",
     "downto", "repeat", "until", "case", "of", "try", "finally", "except",
     "with", "inherited", "result", "var", "const", "type", "nil", "true",
-    "false", "exit", "break", "continue", "uses", "unit", "program",
+    "false", "uses", "unit", "program",
     "library", "interface", "implementation", "initialization", "finalization",
     "procedure", "function", "constructor", "destructor", "operator", "class",
     "record", "object", "array", "string", "integer", "boolean", "real", "char",
-    "writeln", "write", "readln", "read", "assigned", "length", "high",
-    "low", "inc", "dec", "new", "dispose", "setlength", "copy", "pos",
-    "trim", "format", "inttostr", "strtoint", "ord", "chr", "sizeof",
-    "create", "free", "destroy",
 })
 
 def _pascal_strip_comments(text: str) -> str:
@@ -911,6 +910,15 @@ def extract_pascal(path: Path) -> dict:
                     _call_site(caller_nid, _read(only), line, 0)
                 elif only.type == "inherited":
                     _inherited_site(caller_nid, only, line, 0)
+        elif node.type == "assignment":
+            # `F := TFoo.Create;` calls without parentheses on the right-hand
+            # side; the regex extractor reports them too.
+            named = _named(node)
+            rhs = named[-1] if len(named) >= 2 else None
+            if rhs is not None and rhs.type == "identifier":
+                _emit_or_report(caller_nid, _read(rhs), None, line, 0)
+            elif rhs is not None and rhs.type == "exprDot":
+                _call_site(caller_nid, _read(rhs), line, 0)
         for child in node.children:
             walk_calls(child, caller_nid)
 
