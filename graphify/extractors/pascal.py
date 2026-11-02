@@ -8,8 +8,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+# Delphi 12+ multiline string: an odd run of 3+ quotes ending its line, closed
+# by the same run at the start of a later line (indentation allowed). Listed
+# before the single-line form, which would otherwise read the opening `'''` as
+# a quote plus an escaped quote and lose sync at the first `'` in the text.
 _PAS_TOKEN_RE = re.compile(
-    r"'(?:''|[^'])*'"
+    r"(?P<mlq>'''(?:'')*)(?!')[ \t]*\r?\n.*?\r?\n[ \t]*(?P=mlq)(?!')"
+    r"|'(?:''|[^'])*'"
     r"|\{[^}]*\}"
     r"|\(\*.*?\*\)"
     r"|//[^\n]*",
@@ -82,6 +87,32 @@ def _pascal_strip_comments(text: str) -> str:
             return tok
         return "".join(c if c == "\n" else " " for c in tok)
     return _PAS_TOKEN_RE.sub(_sub, text)
+
+def _pascal_mask_strings(text: str) -> str:
+    """Blank the contents of Pascal string literals, keeping their delimiters.
+
+    Every character between the opening and closing quote run becomes a space,
+    except line breaks, so offsets and line numbers stay valid. Comments are
+    left untouched; run ``_pascal_strip_comments`` first.
+    """
+    def _sub(m: re.Match) -> str:
+        tok = m.group(0)
+        if not tok.startswith("'"):
+            return tok
+        q = len(m.group("mlq") or "'")
+        inner = "".join(c if c in "\r\n" else " " for c in tok[q:-q])
+        return tok[:q] + inner + tok[-q:]
+    return _PAS_TOKEN_RE.sub(_sub, text)
+
+def _pascal_is_member_call(callee_text: str) -> bool:
+    """True for a call made on another object or unit (`Query.Refresh`).
+
+    Without the receiver's type the target cannot be told apart from any
+    same-named method elsewhere, so cross-file passes must not guess it.
+    `Self.Foo` stays an ordinary call on the caller's own class.
+    """
+    head, dot, _rest = callee_text.partition(".")
+    return bool(dot) and head.strip().lower() != "self"
 
 def _pascal_split_sections(text: str) -> tuple[str, int, str, int]:
     """Split into (iface_text, iface_offset, impl_text, impl_offset).
@@ -284,7 +315,9 @@ def _extract_pascal_regex(path: Path) -> dict:
     file_nid = _make_id(str_path)
     _add_node(file_nid, path.name, 1)
 
-    stripped = _pascal_strip_comments(raw)
+    # Mask string contents too, so text inside a literal (SQL such as
+    # `initcap(...)`, or an `end;`) is never read as code by the regexes below.
+    stripped = _pascal_mask_strings(_pascal_strip_comments(raw))
 
     # Module header
     module_nid = file_nid
@@ -384,7 +417,10 @@ def _extract_pascal_regex(path: Path) -> dict:
 
         body_start, body_end = _pascal_find_body(impl_text, fm.end())
         body_text = impl_text[body_start:body_end] if body_start else ""
-        impl_records.append((proc_nid, line, body_text, container, name_lower))
+        # Count call lines from where the body starts, not from the header:
+        # `var`/`const` sections between them would otherwise shift every call.
+        body_line = _lineno(stripped, impl_off + body_start) if body_start else line
+        impl_records.append((proc_nid, body_line, body_text, container, name_lower))
 
     # Intra-file call edges, scoped by the caller's own class, then its
     # ancestor chain (via `inherits` edges already emitted above), then
@@ -395,12 +431,12 @@ def _extract_pascal_regex(path: Path) -> dict:
     # pattern) from collapsing into an arbitrary cross-class edge.
     callee_nid = _resolve_pascal_callee_factory(impl_records, edges, module_nid)
     raw_calls: list[dict] = []
-    for caller_nid, caller_line, body_text, _container, _name_lower in impl_records:
+    for caller_nid, body_line, body_text, _container, _name_lower in impl_records:
         for cm in _PAS_CALL_RE.finditer(body_text):
             callee_name = cm.group(1).split(".")[-1].lower()
             if callee_name in _PAS_KEYWORDS:
                 continue
-            call_line = caller_line + body_text.count("\n", 0, cm.start())
+            call_line = body_line + body_text.count("\n", 0, cm.start())
             target_nid = callee_nid(caller_nid, callee_name)
             if target_nid == caller_nid:
                 continue
@@ -414,6 +450,7 @@ def _extract_pascal_regex(path: Path) -> dict:
                     "source_location": f"L{call_line}",
                     "caller_nid": caller_nid,
                     "callee": callee_name,
+                    "is_member_call": _pascal_is_member_call(cm.group(1)),
                 })
                 continue
             pair = (caller_nid, target_nid)
@@ -671,7 +708,7 @@ def extract_pascal(path: Path) -> dict:
     seen_call_pairs: set[tuple[str, str]] = set()
     raw_calls: list[dict] = []
 
-    def _emit_or_report(caller_nid: str, name_lower: str, line: int) -> None:
+    def _emit_or_report(caller_nid: str, name_lower: str, line: int, member: bool = False) -> None:
         target = resolve_callee(caller_nid, name_lower)
         if target == caller_nid:
             return
@@ -685,6 +722,7 @@ def extract_pascal(path: Path) -> dict:
                 "source_location": f"L{line}",
                 "caller_nid": caller_nid,
                 "callee": name_lower,
+                "is_member_call": member,
             })
             return
         pair = (caller_nid, target)
@@ -697,10 +735,13 @@ def extract_pascal(path: Path) -> dict:
             callee_text = None
             for child in node.children:
                 if child.is_named and child.type not in ("exprArgs",):
-                    callee_text = _read(child).split(".")[-1]
+                    callee_text = _read(child)
                     break
             if callee_text:
-                _emit_or_report(caller_nid, callee_text.lower(), node.start_point[0] + 1)
+                _emit_or_report(
+                    caller_nid, callee_text.split(".")[-1].lower(), node.start_point[0] + 1,
+                    member=_pascal_is_member_call(callee_text),
+                )
         elif node.type == "statement":
             # Pascal bare procedure calls with no args: `Reset;`
             # tree-sitter represents these as statement → identifier (no exprCall wrapper)
