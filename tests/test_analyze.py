@@ -895,3 +895,27 @@ def test_surprise_score_normalizes_backslash_paths():
 def test_surprise_score_ignores_leading_dot_slash():
     assert _cross_reasons("./pkg/a.py", "b.py")
     assert not _cross_reasons("./a.py", "b.py")
+
+
+def test_pascal_external_nodes_are_not_god_nodes():
+    G = nx.Graph()
+    G.add_node("ext", label="Dialogs", source_file="Dialogs.pas", pascal_external=True)
+    for i in range(4):
+        G.add_node(f"n{i}", label=f"Proc{i}()", source_file=f"u{i}.pas")
+        G.add_edge(f"n{i}", "ext", relation="calls")
+        G.add_edge(f"n{i}", f"n{(i + 1) % 4}", relation="calls")
+    labels = [g["label"] for g in god_nodes(G, top_n=10)]
+    assert labels and "Dialogs" not in labels
+    del G.nodes["ext"]["pascal_external"]
+    assert god_nodes(G, top_n=1)[0]["label"] == "Dialogs"  # the flag is what hides it
+
+
+def test_pascal_external_edges_are_not_surprising():
+    G = nx.Graph()
+    G.add_node("ext", label="Dialogs", source_file="Dialogs.pas", pascal_external=True)
+    G.add_node("a", label="A()", source_file="a.pas")
+    G.add_node("b", label="B()", source_file="b.pas")
+    G.add_edge("a", "ext", relation="calls", confidence="INFERRED")
+    G.add_edge("a", "b", relation="calls", confidence="EXTRACTED")
+    shown = {(s["source"], s["target"]) for s in surprising_connections(G, top_n=10)}
+    assert all("Dialogs" not in pair for pair in shown)

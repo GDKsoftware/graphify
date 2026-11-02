@@ -113,6 +113,11 @@ def _is_json_key_node(G: nx.Graph, node_id: str) -> bool:
     return label in _JSON_NOISE_LABELS
 
 
+def _is_pascal_external(G: nx.Graph, node_id: str) -> bool:
+    """A Pascal unit stub for a symbol-file target (RTL/VCL): not part of the code base."""
+    return bool(G.nodes[node_id].get("pascal_external"))
+
+
 def god_nodes(G: nx.Graph, top_n: int = 10,
               exclude_hubs_percentile: float | None = None) -> list[dict]:
     """Return the top_n most-connected real entities - the core abstractions.
@@ -139,6 +144,8 @@ def god_nodes(G: nx.Graph, top_n: int = 10,
         if hub_threshold is not None and deg > hub_threshold:
             continue
         if _is_file_node(G, node_id) or _is_concept_node(G, node_id) or _is_json_key_node(G, node_id):
+            continue
+        if _is_pascal_external(G, node_id):
             continue
         if G.nodes[node_id].get("label", "") in _BUILTIN_NOISE_LABELS:
             continue
@@ -351,6 +358,8 @@ def _cross_file_surprises(G: nx.Graph, communities: dict[int, list[str]], top_n:
             continue
         if _is_file_node(G, u) or _is_file_node(G, v):
             continue
+        if _is_pascal_external(G, u) or _is_pascal_external(G, v):
+            continue
 
         u_source = G.nodes[u].get("source_file", "")
         v_source = G.nodes[v].get("source_file", "")
@@ -406,6 +415,8 @@ def _cross_community_surprises(
             return []
         if G.number_of_nodes() > 5000:
             return []
+        if any(_is_pascal_external(G, n) for n in G):
+            G = G.subgraph([n for n in G if not _is_pascal_external(G, n)])
         betweenness = nx.edge_betweenness_centrality(G)
         top_edges = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)[:top_n]
         result = []
@@ -435,6 +446,8 @@ def _cross_community_surprises(
             continue
         # Skip file hub nodes and plain structural edges
         if _is_file_node(G, u) or _is_file_node(G, v):
+            continue
+        if _is_pascal_external(G, u) or _is_pascal_external(G, v):
             continue
         relation = data.get("relation", "")
         if relation in ("imports", "imports_from", "contains", "method"):

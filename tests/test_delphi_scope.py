@@ -195,7 +195,7 @@ def test_incremental_build_keeps_cross_unit_edge(run):
     assert edges[0]["target"] == _routine(full, "UnitB.pas", "Doe()")["id"]
 
 
-def test_symbol_file_targets_give_no_edge_yet(run, monkeypatch):
+def test_symbol_file_target_needs_the_unit_in_uses(run, monkeypatch):
     import json
 
     from graphify import pascal_resolution
@@ -203,7 +203,10 @@ def test_symbol_file_targets_give_no_edge_yet(run, monkeypatch):
     symbols = json.loads((FIXTURES / "delphi-test.symbols.json").read_text(encoding="utf-8"))
     monkeypatch.setattr(pascal_resolution, "load_delphi_symbols", lambda *a, **k: symbols)
     g = run("Casts.pas", "Basis.pas")
-    assert _calls_from(g, "Casts.pas", "Klik()") == []
+    # `Close` is TCustomForm.Close, reached through `Vcl.Forms` in the uses; the
+    # typecast receiver and the event call stay without an edge.
+    edges = _calls_from(g, "Casts.pas", "Klik()")
+    assert [(e["target"], e["rule"]) for e in edges] == [("vcl_forms", "5.1/3")]
 
 
 def _with_symbols(monkeypatch):
@@ -247,7 +250,8 @@ def test_own_field_shadows_routine_of_used_unit(run):
 def test_symbol_file_ancestor_member_shadows_routine_of_used_unit(run, monkeypatch):
     _with_symbols(monkeypatch)
     g = run("ShadowLib.pas", "Shadow.pas")
-    assert _calls_from(g, "Shadow.pas", "Sluit()") == []
+    # The ancestor's `Close` wins over ShadowLib's: the edge goes to the unit stub.
+    assert [e["target"] for e in _calls_from(g, "Shadow.pas", "Sluit()")] == ["vcl_forms"]
     assert _calls_from(g, "Shadow.pas", "Cast()") == []
     assert _calls_from(g, "Shadow.pas", "Event()") == []
 
@@ -357,3 +361,87 @@ def test_field_named_like_global_gives_no_edge(run):
     # global. Deliberately more conservative: when both match, no edge at all.
     g = run("Main.pas", "QualLocal.pas")
     assert _calls_from(g, "QualLocal.pas", "Veld()") == []
+
+
+# ---------------------------------------------- symbol-file targets (external)
+
+
+@pytest.fixture
+def vcl(run, monkeypatch):
+    from graphify import pascal_resolution
+
+    _with_symbols(monkeypatch)
+    monkeypatch.setattr(pascal_resolution, "_namespaces", lambda *a, **k: ["System", "Vcl"],
+                        raising=False)
+    return run("VclGebruik.pas", "ZonderDialogs.pas")
+
+
+def _imports_target(graph: dict, file: str, entry: str) -> str:
+    """Target of the `imports` edge of the module in `file` for the uses entry."""
+    from graphify.extract import _make_id
+
+    stub = _make_id(entry)
+    module = next(
+        n for n in graph["nodes"]
+        if _file(n) == file and n.get("label", "").lower() == Path(file).stem.lower()
+    )
+    hits = [
+        e for e in graph["edges"]
+        if e["relation"] == "imports" and e["source"] == module["id"] and e["target"] == stub
+    ]
+    assert hits, (file, entry)
+    return hits[0]["target"]
+
+
+def _edge_to(graph: dict, file: str, label: str, target: str) -> dict | None:
+    return next((e for e in _calls_from(graph, file, label) if e["target"] == target), None)
+
+
+def test_vcl_routine_resolves_to_unit_stub(vcl):
+    target = _imports_target(vcl, "VclGebruik.pas", "Dialogs")
+    edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", target)
+    assert edge is not None
+    assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.1/6")
+    node = _node(vcl, target)
+    assert node["pascal_external"] is True and "dialogs" in node["label"].lower()
+
+
+def test_ancestor_from_symbol_file(vcl):
+    target = _imports_target(vcl, "VclGebruik.pas", "Forms")
+    edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", target)
+    assert edge is not None and edge["rule"] == "5.1/3"
+
+
+def test_global_from_symbol_file(vcl):
+    forms = _imports_target(vcl, "VclGebruik.pas", "Forms")
+    edge = _edge_to(vcl, "VclGebruik.pas", "Wacht()", forms)
+    assert edge is not None
+    assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.2/4")
+
+
+def test_system_routine_without_uses(vcl):
+    from graphify.ids import make_id
+
+    # The regex extractor treats `IntToStr` as a keyword and reports no call for it,
+    # so the rule is checked with `UpperCase`, which both extractors report.
+    edge = _edge_to(vcl, "VclGebruik.pas", "Doe()", make_id("System"))
+    assert edge is not None
+    assert (edge["confidence"], edge["rule"]) == ("EXTRACTED", "5.1/7")
+    assert _node(vcl, make_id("System"))["pascal_external"] is True
+
+
+def test_vcl_routine_not_in_uses_gives_no_edge(vcl):
+    assert _calls_from(vcl, "ZonderDialogs.pas", "Probeer()") == []
+
+
+def test_external_node_is_created_or_flagged():
+    from graphify.pascal_resolution import _add_external_nodes
+
+    nodes = [{"id": "forms", "label": "Forms", "source_file": ""}]
+    _add_external_nodes({"forms": "Vcl.Forms", "system": "System"}, nodes)
+    by_id = {n["id"]: n for n in nodes}
+    assert by_id["forms"]["pascal_external"] is True
+    assert by_id["system"] == {
+        "id": "system", "label": "System", "file_type": "code", "source_file": "",
+        "pascal_external": True,
+    }

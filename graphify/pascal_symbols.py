@@ -30,6 +30,7 @@ class Member:
     nid: str | None
     owner: str
     unit: str
+    external: bool = False  # declared in the Delphi symbol file, not in the scan
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class Routine:
     params: int | None
     min_params: int | None
     nid: str | None
+    external: bool = False  # declared in the Delphi symbol file, not in the scan
 
 
 @dataclass(frozen=True)
@@ -189,7 +191,7 @@ class SymbolTable:
         for tname, tdef in (block.get("types") or {}).items():
             qualified = f"{name}.{tname}"
             members = {
-                mname.casefold(): tuple(self._member(qualified, name, mname, e) for e in entries)
+                mname.casefold(): tuple(self._member(qualified, name, mname, e, not scanned) for e in entries)
                 for mname, entries in (tdef.get("members") or {}).items()
             }
             symbols = TypeSymbols(
@@ -204,11 +206,13 @@ class SymbolTable:
         params = entry.get("params")
         return Routine(
             name, unit, bool(entry.get("interface", True)), params,
-            entry.get("min_params", params), entry.get("nid"),
+            entry.get("min_params", params), entry.get("nid"), not scanned,
         )
 
     @staticmethod
-    def _member(owner: str, unit: str, name: str, entry: dict) -> Member:
+    def _member(
+        owner: str, unit: str, name: str, entry: dict, external: bool = False,
+    ) -> Member:
         params = entry.get("params")
         return Member(
             name=name,
@@ -221,6 +225,7 @@ class SymbolTable:
             nid=entry.get("nid"),
             owner=owner,
             unit=unit,
+            external=external,
         )
 
     def _apply_includes(
@@ -291,6 +296,30 @@ class SymbolTable:
     def unit(self, name: str) -> UnitSymbols | None:
         resolved = self.resolve_unit_name(name)
         return self._units[resolved.casefold()] if resolved else None
+
+    def external_target(self, caller_unit: str, unit: str) -> str:
+        """Node id of the stub of the symbol-file unit `unit`, seen from `caller_unit`.
+
+        It is the target of the caller's `imports` edge for the uses entry that
+        resolves to `unit`, spelled as written. `System` and `SysInit` are
+        implicit and need no uses entry. Returns "" when the caller does not
+        reach the unit, so no edge is made.
+        """
+        from .extractors.resolution import _pascal_resolve_unit
+        from .ids import make_id
+
+        own = self.unit(caller_unit)
+        if own is not None and own.source_file:
+            for used in (*own.implementation_uses, *own.interface_uses):
+                if (self.resolve_unit_name(used) or "").casefold() == unit.casefold():
+                    return _pascal_resolve_unit(Path(own.source_file), used)
+        if unit.casefold() in ("system", "sysinit"):
+            return make_id(unit)
+        return ""
+
+    def is_external_unit(self, unit: str) -> bool:
+        resolved = self.resolve_unit_name(unit)
+        return resolved is not None and not self._units[resolved.casefold()].scanned
 
     def unit_of_file(self, source_file: str) -> str | None:
         """Unit of a scanned file. An include file belongs to the unit that

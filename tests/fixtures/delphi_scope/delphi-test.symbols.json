@@ -15,7 +15,8 @@
         }
       },
       "routines": {
-        "IntToStr": [{"params": 1}]
+        "IntToStr": [{"params": 1}],
+        "UpperCase": [{"params": 1}]
       }
     },
     "Vcl.Dialogs": {

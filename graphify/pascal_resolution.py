@@ -16,14 +16,16 @@ compiler over a `SymbolTable` built from the per-unit `_pascal_unit` blocks
 
 The first level that knows the name decides. A name that is not visible at any
 level gets no edge: Pascal calls are never bound by name alone. A hit without a
-graph node (a field, a symbol-file routine, a declaration without a body in the
-scan) also ends the search without an edge, so a missing edge is preferred to
-a wrong one.
+graph node (a field, a declaration without a body in the scan) also ends the
+search without an edge, so a missing edge is preferred to a wrong one. A hit in
+the Delphi symbol file (or in `System`/`SysInit`) has no node of its own: the
+edge goes to the stub node of its unit, the target of the caller's `imports`
+edge (spec 5.5).
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .extractors.pascal_calls import is_expression_receiver
 from .pascal_symbols import Member, Routine, SymbolTable, load_delphi_symbols
@@ -33,12 +35,22 @@ _IMPLICIT_UNITS = ("System", "SysInit")
 _RANK = {"EXTRACTED": 2, "INFERRED": 1}
 
 
+def _namespaces() -> list[str]:
+    """Default namespaces that complete a unit name from a `uses` clause.
+
+    Empty until the project's namespaces are read from its `.dproj`.
+    """
+    return []
+
+
 @dataclass(frozen=True)
 class Resolution:
     target: str
     confidence: str
     score: float
     rule: str
+    # Set for a hit in the symbol file: the unit whose stub node is the target.
+    external_unit: str | None = None
 
 
 class _Stop(Exception):
@@ -81,6 +93,8 @@ class DelphiResolver:
 
     def __init__(self, table: SymbolTable) -> None:
         self.table = table
+        # Stub nodes the edges point to: id -> unit name.
+        self.externals: dict[str, str] = {}
 
     def resolve(self, rc: dict) -> Resolution | None:
         callee = str(rc.get("callee") or "")
@@ -97,17 +111,30 @@ class DelphiResolver:
         enclosing: Sequence[str] = rc.get("enclosing_routines") or ()
         arg_count = rc.get("arg_count")
         try:
-            if qualifier is None:
-                return self._unqualified(unit, enclosing, callee, arg_count)
-            if qualifier.casefold() == "self":
-                cls = self.table.caller_class(unit, enclosing)
-                return self._class_scope(unit, cls, callee, arg_count, own=True, prefix="5.2/1")
-            if qualifier.casefold() == "inherited":
-                cls = self.table.caller_class(unit, enclosing)
-                return self._class_scope(unit, cls, callee, arg_count, own=False, prefix="5.2/2")
-            return self._qualified(unit, enclosing, qualifier, callee, arg_count)
+            res = self._resolve_scoped(unit, enclosing, qualifier, callee, arg_count)
         except _Stop:
             return None
+        if res is None or res.external_unit is None:
+            return res
+        target = self.table.external_target(unit, res.external_unit)
+        if not target:
+            return None  # the caller does not reach the unit: no edge
+        self.externals[target] = res.external_unit
+        return replace(res, target=target)
+
+    def _resolve_scoped(
+        self, unit: str, enclosing: Sequence[str], qualifier: str | None, callee: str,
+        arg_count: int | None,
+    ) -> Resolution | None:
+        if qualifier is None:
+            return self._unqualified(unit, enclosing, callee, arg_count)
+        if qualifier.casefold() == "self":
+            cls = self.table.caller_class(unit, enclosing)
+            return self._class_scope(unit, cls, callee, arg_count, own=True, prefix="5.2/1")
+        if qualifier.casefold() == "inherited":
+            cls = self.table.caller_class(unit, enclosing)
+            return self._class_scope(unit, cls, callee, arg_count, own=False, prefix="5.2/2")
+        return self._qualified(unit, enclosing, qualifier, callee, arg_count)
 
     # ------------------------------------------------------------ the rules
 
@@ -144,9 +171,9 @@ class DelphiResolver:
                 continue
             if table.declares_type(resolved, name):
                 raise _Stop
-            if table.routines(resolved, name, interface_only=True):
-                # Rule 7 targets come from the symbol file: no edge yet.
-                raise _Stop
+            found = table.routines(resolved, name, interface_only=True)
+            if found:
+                return self._outcome(found, arg_count, "5.1/7")
         return None
 
     def _class_scope(
@@ -340,8 +367,10 @@ class DelphiResolver:
                 chosen, confidence, score = fits[0], "EXTRACTED", 1.0
             else:
                 chosen, confidence, score = candidates[0], "INFERRED", 0.85
+        if chosen.external:
+            return Resolution("", confidence, score, rule, external_unit=chosen.unit)
         if chosen.nid is None:
-            raise _Stop  # no graph node (symbol file, declaration without body)
+            raise _Stop  # no graph node (declaration without a body in the scan)
         return Resolution(chosen.nid, confidence, score, rule)
 
 
@@ -360,7 +389,7 @@ def build_symbol_table(nodes: list[dict]) -> SymbolTable:
         for n in nodes
         if isinstance(n.get("_pascal_unit"), dict)
     ]
-    return SymbolTable.from_sources(blocks, load_delphi_symbols())
+    return SymbolTable.from_sources(blocks, load_delphi_symbols(), _namespaces())
 
 
 def resolve_pascal_calls(
@@ -425,3 +454,22 @@ def resolve_pascal_calls(
         }
         existing[pair] = edge
         all_edges.append(edge)
+    _add_external_nodes(resolver.externals, all_nodes)
+
+
+def _add_external_nodes(externals: dict[str, str], all_nodes: list[dict]) -> None:
+    """Make sure every stub an edge points to is a node, flagged `pascal_external`.
+
+    A node that exists already (a unit file in the scan) only gets the flag when
+    it is a stub itself, so a real file node stays a real file node.
+    """
+    known = {n.get("id"): n for n in all_nodes}
+    for nid, unit in externals.items():
+        node = known.get(nid)
+        if node is None:
+            all_nodes.append({
+                "id": nid, "label": unit, "file_type": "code", "source_file": "",
+                "pascal_external": True,
+            })
+        elif not node.get("source_file"):
+            node["pascal_external"] = True
