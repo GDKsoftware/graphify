@@ -64,3 +64,22 @@ def test_generated_file_loads_into_symbol_table(tmp_path: Path) -> None:
 
 def test_package_data_includes_symbol_files() -> None:
     assert "data/delphi/*.symbols.json.gz" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_example_directories_are_skipped() -> None:
+    dialogs = _gen()["units"]["Vcl.Dialogs"]
+    assert "ExampleOnly" not in dialogs["routines"]
+    assert "ShowMessage" in dialogs["routines"]
+
+
+def test_duplicate_unit_prefers_the_shallowest_file() -> None:
+    assert list(_gen()["units"]["Dup"]["routines"]) == ["Shallow"]
+
+
+def test_program_file_is_skipped() -> None:
+    assert "Prog" not in _gen()["units"]
+
+
+def test_member_visibility_filter() -> None:
+    members = _gen()["units"]["Vis"]["types"]["TVis"]["members"]
+    assert set(members) == {"Inner", "Shown"}

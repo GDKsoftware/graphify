@@ -16,6 +16,7 @@ import datetime
 import gzip
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -27,6 +28,14 @@ _LOG = logging.getLogger(__name__)
 GENERATOR_VERSION = "1"
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "graphify" / "data" / "delphi"
 _VISIBLE = ("protected", "strict protected", "public", "published")
+# Directories that hold test frameworks, examples and demos, not RTL/VCL units.
+_SKIP_DIR_NAMES = frozenset({
+    "examples", "example", "demos", "demo", "samples", "sample",
+    "test", "tests", "unittests", "contrib",
+})
+_SKIP_TOP_TREES = frozenset({"dunit", "dunitx"})
+_COMMENT_RE = re.compile(r"\{[^}]*\}|\(\*.*?\*\)|//[^\n]*", re.DOTALL)
+_UNIT_HEADER_RE = re.compile(r"^\s*unit\s+([A-Za-z_][\w.]*)\s*[;(]", re.IGNORECASE | re.MULTILINE)
 # Per-scan fields that mean nothing in a symbol file.
 _DROP_UNIT_KEYS = ("module_nid", "includes")
 
@@ -41,63 +50,106 @@ def _strip(block: dict) -> dict:
     for key in _DROP_UNIT_KEYS:
         block.pop(key, None)
     for tdef in block.get("types", {}).values():
-        tdef["members"] = {
-            name: kept
-            for name, entries in tdef.get("members", {}).items()
-            if (kept := [dict(e) for e in entries if e.get("vis") in _VISIBLE])
-        }
+        members = {}
+        for name, entries in tdef.get("members", {}).items():
+            kept = [
+                {k: v for k, v in e.items() if k != "nid"}
+                for e in entries
+                if e.get("vis") in _VISIBLE
+            ]
+            if kept:
+                members[name] = kept
+        tdef["members"] = members
     for entries in block.get("routines", {}).values():
         for e in entries:
             e.pop("nid", None)
-    for tdef in block.get("types", {}).values():
-        for entries in tdef["members"].values():
-            for e in entries:
-                e.pop("nid", None)
     return block
 
 
+class _MissingIncludeCounter(logging.Filter):
+    """Counts the builder's "include file not found" warnings and keeps them out of the log."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "include file not found" not in record.getMessage():
+            return True
+        self.count += 1
+        _LOG.debug("%s", record.getMessage())
+        return False
+
+
+def _skipped(rel: Path) -> bool:
+    parts = [p.casefold() for p in rel.parts]
+    if parts[0] in _SKIP_TOP_TREES:
+        return True
+    return any(p in _SKIP_DIR_NAMES for p in parts[:-1])
+
+
+def _unit_name(raw: str) -> str | None:
+    """The name in the `unit` header of a source, or None for a program, library or package."""
+    m = _UNIT_HEADER_RE.search(_COMMENT_RE.sub(" ", raw))
+    return m.group(1) if m else None
+
+
 def generate(source_root: Path, version: str, generated_at: str | None = None) -> dict:
-    """The symbol file content for the units under `source_root`."""
+    """The symbol file content for the units under `source_root`.
+
+    Files under test, example and demo directories are skipped (`_SKIP_DIR_NAMES`,
+    `_SKIP_TOP_TREES`). Of a unit name declared twice, the shallowest file wins,
+    then the first by casefolded relative path; a warning is logged when the two
+    declarations differ.
+    """
     source_root = Path(source_root)
     include_dirs = _include_dirs(source_root)
-    files = sorted(
-        (p for p in source_root.rglob("*") if p.suffix.lower() == ".pas" and p.is_file()),
-        key=lambda p: p.relative_to(source_root).as_posix().casefold(),
-    )
+    candidates = []
+    for p in source_root.rglob("*"):
+        if p.suffix.lower() != ".pas" or not p.is_file():
+            continue
+        rel = p.relative_to(source_root)
+        if not _skipped(rel):
+            candidates.append((len(rel.parts), rel.as_posix().casefold(), p))
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    counter = _MissingIncludeCounter()
+    builder_log = logging.getLogger("graphify.extractors.pascal_unit")
+    builder_log.addFilter(counter)
     units: dict[str, dict] = {}
-    chosen: dict[str, Path] = {}
-    for path in files:
-        try:
-            raw = _read_source_text(path, warn=False)
-            block = build_pascal_unit(
+    chosen: dict[str, tuple[str, Path]] = {}
+    try:
+        for _depth, _rel, path in candidates:
+            try:
+                raw = _read_source_text(path, warn=False)
+            except (OSError, UnicodeDecodeError) as exc:
+                _LOG.warning("skipping %s: %s", path, exc)
+                continue
+            name = _unit_name(raw)
+            if name is None:
+                continue
+            block = _strip(build_pascal_unit(
                 path, raw, stem=_file_stem(path), interface_only=True, include_dirs=include_dirs,
-            )
-        except (OSError, UnicodeDecodeError) as exc:
-            _LOG.warning("skipping %s: %s", path, exc)
-            continue
-        name = block.get("unit")
-        if not name or not _has_unit_header(raw):
-            continue
-        key = name.casefold()
-        if key in chosen:
-            _LOG.warning("duplicate unit %s: keeping %s, ignoring %s", name, chosen[key], path)
-            continue
-        units[name] = _strip(block)
-        chosen[key] = path
+            ))
+            key = name.casefold()
+            if key in chosen:
+                if units[chosen[key][0]] != block:
+                    _LOG.warning(
+                        "duplicate unit %s differs: keeping %s, ignoring %s",
+                        name, chosen[key][1], path,
+                    )
+                continue
+            units[name] = block
+            chosen[key] = (name, path)
+    finally:
+        builder_log.removeFilter(counter)
+    if counter.count:
+        _LOG.warning("%d include files were not found and skipped", counter.count)
     return {
         "delphi_version": version,
         "generator_version": GENERATOR_VERSION,
         "generated_at": generated_at or datetime.date.today().isoformat(),
         "units": units,
     }
-
-
-def _has_unit_header(raw: str) -> bool:
-    from graphify.extractors import pascal as _pas
-
-    stripped = _pas._pascal_mask_strings(_pas._pascal_strip_comments(raw))
-    m = _pas._PAS_MODULE_RE.search(stripped)
-    return bool(m) and m.group(1).lower() == "unit"
 
 
 def write(symbols: dict, out_path: Path) -> None:
