@@ -1,6 +1,7 @@
 """Raw calls reported by the Pascal extractors: qualifier, argument count and
 enclosing routines, plus the shared call-site helpers."""
 
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false, reportOperatorIssue=false
 from __future__ import annotations
 
 from pathlib import Path

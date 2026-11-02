@@ -525,6 +525,7 @@ def _add_variables(stmt: str, out: dict[str, str]) -> None:
 
 def _parse_routine(text: str, pos: int, bodies: bool) -> tuple[_Routine, int]:
     m = _ROUTINE_RE.match(text, pos)
+    assert m is not None
     end, nxt, _ = _next_statement(text, pos)
     rest = text[m.end():end].lstrip()
     name = re.sub(r"\s*<[^>]*>", "", m.group("name")).replace("&", "")
@@ -712,7 +713,7 @@ def _parse_members(
         pm = _PROPERTY_RE.match(s)
         if pm:
             skipping = False
-            entry = {"vis": vis, "kind": "property"}
+            entry: dict = {"vis": vis, "kind": "property"}
             ptype = _normalize(pm.group("type") or "")
             if ptype:
                 entry["type"] = ptype

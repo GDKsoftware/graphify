@@ -1,4 +1,5 @@
 """The symbol table over scanned Pascal units and bundled Delphi symbols (spec 3.2)."""
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false, reportOperatorIssue=false
 from __future__ import annotations
 
 import gzip

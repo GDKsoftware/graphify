@@ -1,4 +1,5 @@
 """`.dproj` reading, the `.graphifyrc` Pascal keys and the Delphi symbol file choice."""
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false, reportOperatorIssue=false
 from __future__ import annotations
 
 import gzip

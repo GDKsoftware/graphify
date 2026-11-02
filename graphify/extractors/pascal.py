@@ -321,9 +321,9 @@ def _pascal_scan_routine(text: str, hm: re.Match, parent: _PascalRoutine | None)
             return r  # no body at all: must not swallow the routines after it
         header_first = nh is not None and nh.start() < bm.start()
         # A qualified header (`TFoo.Bar`) is never nested: this one has no body.
-        if header_first and "." in nh.group("qual"):
+        if nh is not None and header_first and "." in nh.group("qual"):
             return r
-        if header_first:
+        if nh is not None and header_first:
             child = _pascal_scan_routine(text, nh, r)
             r.children.append(child)
             cur = r.end_pos = child.end_pos
