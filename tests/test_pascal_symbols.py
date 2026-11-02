@@ -228,3 +228,25 @@ def test_duplicate_unit_in_uses_makes_type_lookups_ambiguous():
     assert t.lookup_type("Caller", "TThing") is None
     assert t.declares_type("Dup", "TThing") is True
     assert t.declares_type("Dup", "TNope") is False
+
+
+def test_repeated_lookups_reuse_the_unit_name_and_search_order(monkeypatch):
+    # The resolver asks the same questions for every call in a unit: which
+    # unit a uses entry names, and in which order the units are searched.
+    # The table does not change once built, so those answers are computed once.
+    t = SymbolTable.from_sources([_block(DECLS)], _delphi(), NAMESPACES)
+    calls = {"names": 0}
+    real = SymbolTable._name_candidates
+
+    def counting(self, name):
+        calls["names"] += 1
+        return real(self, name)
+
+    monkeypatch.setattr(SymbolTable, "_name_candidates", counting)
+    first = [t.lookup_type("Decls", "TForm") for _ in range(50)]
+    after_first = calls["names"]
+    for _ in range(50):
+        t.lookup_type("Decls", "TForm")
+        t.resolve_unit_name("Dialogs")
+    assert calls["names"] <= after_first + 1
+    assert first[0] == t.lookup_type("Decls", "TForm")

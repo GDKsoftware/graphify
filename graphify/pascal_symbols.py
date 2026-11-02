@@ -177,6 +177,18 @@ class SymbolTable:
         self._ambiguous: dict[str, list[str]] = {}
         # Include file -> the units that include it.
         self._include_owners: dict[str, list[str]] = {}
+        # Answers the resolver asks for again and again; the table does not
+        # change once built, and every builder below empties them.
+        self._unit_name_memo: dict[str, str | None] = {}
+        self._duplicates_memo: dict[str, tuple[str, ...]] = {}
+        self._search_order_memo: dict[str, list[list[str]]] = {}
+        self._ancestors_memo: dict[str, tuple[str, ...]] = {}
+
+    def _forget(self) -> None:
+        self._unit_name_memo.clear()
+        self._duplicates_memo.clear()
+        self._search_order_memo.clear()
+        self._ancestors_memo.clear()
 
     # ------------------------------------------------------------ building
 
@@ -221,9 +233,11 @@ class SymbolTable:
             if key not in table._units and key not in table._ambiguous:
                 table._add_unit(name, block, scanned=False)
         table._apply_includes(list(zip(keys, unit_blocks)), include_blocks)
+        table._forget()
         return table
 
     def _add_unit(self, name: str, block: dict, *, scanned: bool) -> None:
+        self._forget()
         key = name.casefold()
         source = block.get("source_file")
         self._units[key] = UnitSymbols(
@@ -317,6 +331,7 @@ class SymbolTable:
                     owners.append(self._units[key].name)
 
     def _replace_with_include(self, unit_key: str, inc: dict) -> None:
+        self._forget()
         unit = self._units[unit_key]
         routines = self._routines[unit_key]
         for rname, entries in (inc.get("routines") or {}).items():
@@ -342,23 +357,34 @@ class SymbolTable:
         A unit name that more than one scanned file declares resolves to None;
         `duplicates` returns the private names of its blocks.
         """
+        key = name.casefold()
+        if key in self._unit_name_memo:
+            return self._unit_name_memo[key]
+        resolved: str | None = None
         for candidate in self._name_candidates(name):
             if candidate in self._ambiguous:
-                return None
+                break
             found = self._units.get(candidate)
             if found is not None:
-                return found.name
-        return None
+                resolved = found.name
+                break
+        self._unit_name_memo[key] = resolved
+        return resolved
 
     def duplicates(self, name: str) -> list[str]:
         """Private unit names of every scanned file declaring `name`, when more
         than one does (the name is then ambiguous); otherwise empty."""
-        for candidate in self._name_candidates(name):
-            if candidate in self._ambiguous:
-                return list(self._ambiguous[candidate])
-            if candidate in self._units:
-                return []
-        return []
+        key = name.casefold()
+        if key not in self._duplicates_memo:
+            dups: tuple[str, ...] = ()
+            for candidate in self._name_candidates(name):
+                if candidate in self._ambiguous:
+                    dups = tuple(self._ambiguous[candidate])
+                    break
+                if candidate in self._units:
+                    break
+            self._duplicates_memo[key] = dups
+        return list(self._duplicates_memo[key])
 
     def _name_candidates(self, name: str) -> list[str]:
         return [name.casefold(), *(f"{ns}.{name}".casefold() for ns in self._namespaces)]
@@ -424,6 +450,13 @@ class SymbolTable:
         Each entry lists the units behind one name: a single unit, or every
         block of a unit name that several scanned files declare.
         """
+        key = unit.casefold()
+        memo = self._search_order_memo.get(key)
+        if memo is None:
+            memo = self._search_order_memo[key] = self._compute_search_order(unit)
+        return memo
+
+    def _compute_search_order(self, unit: str) -> list[list[str]]:
         implicit = self.resolve_unit_name(_IMPLICIT_UNIT)
         own = self.unit(unit)
         if own is None:
@@ -441,6 +474,12 @@ class SymbolTable:
 
     def ancestors(self, qualified_type: str) -> list[str]:
         """Ancestors of a type, nearest first."""
+        key = qualified_type.casefold()
+        if key not in self._ancestors_memo:
+            self._ancestors_memo[key] = tuple(self._compute_ancestors(qualified_type))
+        return list(self._ancestors_memo[key])
+
+    def _compute_ancestors(self, qualified_type: str) -> list[str]:
         chain: list[str] = []
         seen = {qualified_type.casefold()}
         current = self.type(qualified_type)
