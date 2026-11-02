@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from .extractors.pascal_calls import is_expression_receiver
+from .pascal_dproj import active_dproj
 from .pascal_symbols import Member, Routine, SymbolTable, load_delphi_symbols
 
 RESOLVED_BY = "delphi_scope"
@@ -41,9 +42,10 @@ _CREATE_RE = re.compile(r"([A-Za-z_]\w*)\s*\.\s*Create\s*(?:\(.*\))?", re.IGNORE
 def _namespaces() -> list[str]:
     """Default namespaces that complete a unit name from a `uses` clause.
 
-    Empty until the project's namespaces are read from its `.dproj`.
+    The `DCC_Namespace` entries of the active `.dproj`; empty without one.
     """
-    return []
+    info = active_dproj()
+    return list(info.namespaces) if info else []
 
 
 @dataclass(frozen=True)

@@ -178,7 +178,8 @@ def test_load_delphi_symbols_picks_highest_version(tmp_path, monkeypatch):
             json.dump(data, f)
     assert load_delphi_symbols()["delphi_version"] == "13.10"
     assert load_delphi_symbols("12.3")["delphi_version"] == "12.3"
-    assert load_delphi_symbols("11.0") is None
+    # a version without a file falls back to the newest one, with a warning
+    assert load_delphi_symbols("11.0")["delphi_version"] == "13.10"
 
 
 def _unit_block(name: str, source: str, routine: str, nid: str) -> dict:

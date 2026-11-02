@@ -1,0 +1,14 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectVersion>0.0</ProjectVersion>
+        <MainSource>Main.pas</MainSource>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Base)'!=''">
+        <DCC_Namespace>System;Xml;Vcl;$(DCC_Namespace)</DCC_Namespace>
+        <DCC_UnitSearchPath>..\shared;libs\common;$(BDS)\lib;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(Cfg_1)'!=''">
+        <DCC_Namespace>Vcl;Vcl.Imaging;$(DCC_Namespace)</DCC_Namespace>
+        <DCC_UnitSearchPath>libs\common;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    </PropertyGroup>
+</Project>

@@ -395,8 +395,12 @@ def _attach_pascal_unit(path: Path, raw: str, stem: str, nodes: list[dict], resu
     """Put the unit symbol block on the module node (file node when the file
     has no unit header) and the declared visibility on every method node."""
     from graphify.extractors.pascal_unit import build_pascal_unit
+    from graphify.pascal_dproj import active_dproj
 
-    block = build_pascal_unit(path, raw, stem=stem)
+    # The `.dproj` search path only locates `{$I}` files; `imports` edges are unaffected.
+    dproj = active_dproj()
+    include_dirs = dproj.search_path if dproj else ()
+    block = build_pascal_unit(path, raw, stem=stem, include_dirs=include_dirs)
     # Two independent copies: the node marker is persisted, the result copy is
     # read in-process; extract() keeps both in step with the final node ids.
     result["pascal_unit"] = copy.deepcopy(block)

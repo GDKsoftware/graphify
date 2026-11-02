@@ -36,8 +36,11 @@ from graphify.rcfile import (
     activate_language_overrides,
     cache_salt,
     effective_suffix,
+    PascalSettings,
     get_language_overrides,
+    get_pascal_settings,
     set_language_overrides,
+    set_pascal_settings,
 )
 from graphify.extractors.base import (  # noqa: F401
     _LANGUAGE_BUILTIN_GLOBALS,
@@ -9264,11 +9267,14 @@ def _safe_extract_with_xaml_root(extractor, path: Path, root: Path) -> dict:
         set_active_scan_root(previous_root)
 
 
-def _worker_init(language_overrides: dict[str, str]) -> None:
+def _worker_init(
+    language_overrides: dict[str, str], pascal_settings: PascalSettings | None = None
+) -> None:
     """Pool initializer. Under ``spawn`` a worker re-imports the package and
     starts with no overrides; hand it the parent's so `_get_extractor` and the
     cache key agree across processes (#2961)."""
     set_language_overrides(language_overrides)
+    set_pascal_settings(pascal_settings)
 
 
 def _extract_single_file(args: tuple) -> tuple[int, dict]:
@@ -9423,7 +9429,7 @@ def _extract_parallel(
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=_worker_init,
-            initargs=(get_language_overrides(),),
+            initargs=(get_language_overrides(), get_pascal_settings()),
         ) as pool:
             futures = {
                 pool.submit(_extract_single_file, item): pos

@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .pascal_dproj import active_dproj, delphi_version_for
+from .rcfile import get_pascal_settings
+
+_LOG = logging.getLogger(__name__)
 
 _DELPHI_DATA_DIR = Path(__file__).parent / "data" / "delphi"
 _SYMBOL_FILE_RE = re.compile(r"^delphi-(.+)\.symbols\.json\.gz$", re.IGNORECASE)
@@ -71,28 +77,74 @@ def _version_key(version: str) -> tuple:
     return tuple(int(p) if p.isdigit() else 0 for p in re.split(r"[.\-]", version))
 
 
-def load_delphi_symbols(version: str | None = None) -> dict | None:
-    """Read the bundled symbol file of a Delphi version, or the highest one.
-
-    Returns None when the data directory is missing or holds no matching file.
-    """
-    if not _DELPHI_DATA_DIR.is_dir():
-        return None
+def _symbol_files(directory: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
-    for p in _DELPHI_DATA_DIR.iterdir():
+    if not directory.is_dir():
+        return found
+    for p in directory.iterdir():
         m = _SYMBOL_FILE_RE.match(p.name)
         if m and p.is_file():
             found[m.group(1)] = p
+    return found
+
+
+def _choose(directory: Path, version: str | None) -> Path | None:
+    """The symbol file of `version` in `directory`, else the newest one."""
+    found = _symbol_files(directory)
     if not found:
         return None
-    if version is None:
-        chosen = found[max(found, key=_version_key)]
-    else:
-        chosen = next((p for v, p in found.items() if v.lower() == version.lower()), None)
-        if chosen is None:
-            return None
-    with gzip.open(chosen, "rt", encoding="utf-8") as f:
+    if version is not None:
+        match = next((p for v, p in found.items() if v.lower() == version.lower()), None)
+        if match is not None:
+            return match
+        _LOG.warning(
+            "no Delphi symbol file for version %s in %s; using the newest", version, directory
+        )
+    return found[max(found, key=_version_key)]
+
+
+def _read(path: Path) -> dict:
+    with gzip.open(path, "rt", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_delphi_symbols(version: str | None = None) -> dict | None:
+    """Read the symbol file of a Delphi version (spec 4.4).
+
+    1. `version` (or `pascal.delphi_version`) `none`: no symbols.
+    2. `pascal.delphi_symbols` names a file: that file; a directory: the rules
+       below inside it; a missing path: a warning and the package directory.
+    3. A file for the version, else a warning and the newest file.
+    4. No version: the one the `.dproj` implies, else the newest file.
+
+    Returns None when the chosen directory holds no symbol file.
+    """
+    settings = get_pascal_settings()
+    requested = version if version is not None else settings.delphi_version
+    if requested is not None and requested.strip().lower() == "none":
+        return None
+    if requested is None:
+        info = active_dproj()
+        requested = delphi_version_for(info.project_version) if info else None
+
+    if settings.delphi_symbols:
+        target = Path(settings.delphi_symbols)
+        if not target.is_absolute() and settings.root is not None:
+            target = settings.root / target
+        if target.is_file():
+            return _read(target)
+        if target.is_dir():
+            chosen = _choose(target, requested)
+            if chosen is not None:
+                return _read(chosen)
+            _LOG.warning("no Delphi symbol file in %s; using the bundled files", target)
+        else:
+            _LOG.warning(
+                "pascal.delphi_symbols %s does not exist; using the bundled files", target
+            )
+
+    chosen = _choose(_DELPHI_DATA_DIR, requested)
+    return _read(chosen) if chosen is not None else None
 
 
 class SymbolTable:
