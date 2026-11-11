@@ -22,7 +22,12 @@ def extractor(request, monkeypatch):
 
 
 @pytest.fixture
-def run(extractor, tmp_path):
+def run(extractor, tmp_path, monkeypatch):
+    from graphify import pascal_resolution
+
+    # The package ships a real symbol file; these tests use fixture symbols only.
+    monkeypatch.setattr(pascal_resolution, "load_delphi_symbols", lambda *a, **k: None)
+
     def _run(*names: str, **kwargs) -> dict:
         paths = [FIXTURES / n for n in names]
         return extract(paths, cache_root=tmp_path / "cache", parallel=False, **kwargs)

@@ -416,7 +416,7 @@ pascal.delphi_version=13.2
 pascal.delphi_symbols=tools/delphi-symbols
 ```
 
-graphify ships no Delphi symbol file. Without one, calls into the RTL/VCL stay unresolved. Generate one from your own licensed Delphi sources and point `pascal.delphi_symbols` at it (a path that does not exist gives a warning and falls back to the package directory):
+graphify ships the symbol file for Delphi 13.2 (`graphify/data/delphi/delphi-13.2.symbols.json.gz`), so calls into the RTL/VCL resolve without any setting. For another Delphi version, generate one from your own licensed Delphi sources and point `pascal.delphi_symbols` at it (a path that does not exist gives a warning and falls back to the package directory):
 
 ```
 python -m tools.delphi_symbols <source_root> --version 13.2 [--out PATH] [--generated-at YYYY-MM-DD]
